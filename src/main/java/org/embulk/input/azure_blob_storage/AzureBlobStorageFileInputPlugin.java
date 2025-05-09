@@ -1,17 +1,12 @@
 package org.embulk.input.azure_blob_storage;
 
-import com.google.common.base.Charsets;
-import com.google.common.io.BaseEncoding;
-import com.microsoft.azure.storage.CloudStorageAccount;
-import com.microsoft.azure.storage.OperationContext;
-import com.microsoft.azure.storage.ResultContinuation;
-import com.microsoft.azure.storage.ResultContinuationType;
-import com.microsoft.azure.storage.ResultSegment;
-import com.microsoft.azure.storage.StorageException;
-import com.microsoft.azure.storage.blob.CloudBlob;
-import com.microsoft.azure.storage.blob.CloudBlobClient;
-import com.microsoft.azure.storage.blob.CloudBlobContainer;
-import com.microsoft.azure.storage.blob.ListBlobItem;
+import java.io.IOException;
+import java.net.URISyntaxException;
+import java.security.InvalidKeyException;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Optional;
+
 import org.embulk.config.ConfigDiff;
 import org.embulk.config.ConfigException;
 import org.embulk.config.ConfigSource;
@@ -34,12 +29,18 @@ import org.embulk.util.retryhelper.Retryable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.net.URISyntaxException;
-import java.security.InvalidKeyException;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Optional;
+import com.google.common.base.Charsets;
+import com.google.common.io.BaseEncoding;
+import com.microsoft.azure.storage.CloudStorageAccount;
+import com.microsoft.azure.storage.OperationContext;
+import com.microsoft.azure.storage.ResultContinuation;
+import com.microsoft.azure.storage.ResultContinuationType;
+import com.microsoft.azure.storage.ResultSegment;
+import com.microsoft.azure.storage.StorageException;
+import com.microsoft.azure.storage.blob.CloudBlob;
+import com.microsoft.azure.storage.blob.CloudBlobClient;
+import com.microsoft.azure.storage.blob.CloudBlobContainer;
+import com.microsoft.azure.storage.blob.ListBlobItem;
 
 public class AzureBlobStorageFileInputPlugin
         implements FileInputPlugin
@@ -78,6 +79,10 @@ public class AzureBlobStorageFileInputPlugin
         @Config("proxy")
         @ConfigDefault("null")
         Optional<ProxyTask> getProxy();
+
+        @Config("stop_when_file_not_found")
+        @ConfigDefault("false")
+        boolean getStopWhenFileNotFound();
 
         FileList getFiles();
         void setFiles(FileList files);
@@ -145,8 +150,15 @@ public class AzureBlobStorageFileInputPlugin
         }
         FileList.Builder builder = new FileList.Builder(task);
 
-        return listFilesWithPrefix(builder, task.getAccountName(), task.getAccountKey(), task.getContainer(), task.getPathPrefix(),
+        FileList fileList = listFilesWithPrefix(builder, task.getAccountName(), task.getAccountKey(), task.getContainer(), task.getPathPrefix(),
                                     task.getLastPath(), task.getMaxResults(), task.getMaxConnectionRetry(), task.getProxy().orElse(null));
+
+        if (fileList.getTaskCount() == 0 && task.getStopWhenFileNotFound()) {
+            throw new ConfigException("No file is found. \"stop_when_file_not_found\" option is \"true\".");
+        }
+
+        return fileList;
+
     }
 
     private static FileList listFilesWithPrefix(final FileList.Builder builder, final String accountName, final String accountKey,
