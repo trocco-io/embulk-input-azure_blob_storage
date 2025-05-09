@@ -8,6 +8,7 @@ plugins {
     id "maven"
     id 'maven-publish'
     id "org.embulk.embulk-plugins" version "0.4.2"
+    id "com.palantir.git-version" version "3.0.0"
 }
 
 repositories {
@@ -18,9 +19,16 @@ repositories {
 sourceCompatibility = 1.8
 targetCompatibility = 1.8
 
-group = "com.treasuredata.embulk.plugins"
+group = "trocco-io"
+version = {
+    def vd = versionDetails()
+    if (vd.commitDistance == 0 && vd.lastTag ==~ /^v?[0-9]+\.[0-9]+\.[0-9]+([.-][.a-zA-Z0-9-]+)?/) {
+        vd.lastTag.replaceFirst(/^v/, "")
+    } else {
+        "0.0.0.${vd.gitHash}"
+    }
+}()
 description = "An Embulk plugin to loads records from Azure Blob Storage."
-version = "0.3.2"
 
 def embulkVersion = '0.10.31';
 
