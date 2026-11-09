@@ -113,10 +113,15 @@ public class AzureBlobClientFactory
         final String tenantId = required(task.getTenantId(), "tenant_id");
         final String clientId = required(task.getClientId(), "client_id");
         final String clientSecret = required(task.getClientSecret(), "client_secret");
-        // The secret is part of the key so that a changed secret gets a new token. The key stays in memory only.
-        String key = tenantId + "\u0000" + clientId + "\u0000" + clientSecret;
+        final ProxyTask proxyTask = task.getProxy().orElse(null);
+        // The secret is part of the key so that a changed secret gets a new token, and the proxy so that a job with
+        // other proxy settings doesn't reuse a provider bound to the first job's proxy. The key stays in memory only.
+        String proxyKey = proxyTask == null ? "-" : String.join("\u0000", proxyTask.getType().name(),
+                proxyTask.getHost().orElse(""), String.valueOf(proxyTask.getPort()),
+                proxyTask.getUser().orElse(""), proxyTask.getPassword().orElse(""));
+        String key = String.join("\u0000", tenantId, clientId, clientSecret, proxyKey);
         return TOKEN_PROVIDERS.computeIfAbsent(key,
-                k -> new ServicePrincipalTokenProvider(tenantId, clientId, clientSecret, task.getProxy().orElse(null)));
+                k -> new ServicePrincipalTokenProvider(tenantId, clientId, clientSecret, proxyTask));
     }
 
     private synchronized StorageCredentialsToken tokenCredentials()
