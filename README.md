@@ -16,7 +16,15 @@ embulk-input-azure_blog_storage v0.2.0+ requires Embulk v0.9.12+
 First, create Azure [Storage Account](https://azure.microsoft.com/en-us/documentation/articles/storage-create-storage-account/).
 
 - **account_name**: storage account name (string, required)
-- **account_key**: primary access key (string, required)
+- **auth_method**: how to authenticate (string, optional, default: `account_key`)
+    - **account_key**: use the storage account access key
+    - **service_principal**: use a Microsoft Entra ID service principal with a client secret. The service principal needs a data role on the storage account or container, such as `Storage Blob Data Reader`. The access token is refreshed automatically during long transfers.
+    - **sas_token**: use a shared access signature. Listing files needs the `list` and `read` permissions. A container-level SAS works too.
+- **account_key**: primary access key (string, required when `auth_method` is `account_key`)
+- **tenant_id**: directory (tenant) ID of the service principal (string, required when `auth_method` is `service_principal`)
+- **client_id**: application (client) ID of the service principal (string, required when `auth_method` is `service_principal`)
+- **client_secret**: client secret of the service principal (string, required when `auth_method` is `service_principal`)
+- **sas_token**: SAS token, with or without the leading `?` (string, required when `auth_method` is `sas_token`)
 - **container**: container name data stored (string, required)
 - **path_prefix**: prefix of target keys (string, required) (string, required)
 - **incremental**: enables incremental loading(boolean, optional. default: true). If incremental loading is enabled, config diff for the next execution will include `last_path` parameter so that next execution skips files before the path. Otherwise, `last_path` will not be included.
@@ -40,6 +48,32 @@ in:
   type: azure_blob_storage
   account_name: myaccount
   account_key: myaccount_key
+  container: my-container
+  path_prefix: logs/csv-
+```
+
+With a service principal:
+
+```yaml
+in:
+  type: azure_blob_storage
+  account_name: myaccount
+  auth_method: service_principal
+  tenant_id: 00000000-0000-0000-0000-000000000000
+  client_id: 00000000-0000-0000-0000-000000000000
+  client_secret: my_client_secret
+  container: my-container
+  path_prefix: logs/csv-
+```
+
+With a SAS token:
+
+```yaml
+in:
+  type: azure_blob_storage
+  account_name: myaccount
+  auth_method: sas_token
+  sas_token: sv=2022-11-02&ss=b&srt=co&sp=rl&se=2027-01-01T00:00:00Z&sig=...
   container: my-container
   path_prefix: logs/csv-
 ```

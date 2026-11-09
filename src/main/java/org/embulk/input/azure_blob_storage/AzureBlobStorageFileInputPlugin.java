@@ -2,7 +2,6 @@ package org.embulk.input.azure_blob_storage;
 
 import java.io.IOException;
 import java.net.URISyntaxException;
-import java.security.InvalidKeyException;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
@@ -31,7 +30,6 @@ import org.slf4j.LoggerFactory;
 
 import com.google.common.base.Charsets;
 import com.google.common.io.BaseEncoding;
-import com.microsoft.azure.storage.CloudStorageAccount;
 import com.microsoft.azure.storage.OperationContext;
 import com.microsoft.azure.storage.ResultContinuation;
 import com.microsoft.azure.storage.ResultContinuationType;
@@ -51,8 +49,32 @@ public class AzureBlobStorageFileInputPlugin
         @Config("account_name")
         String getAccountName();
 
+        @Config("auth_method")
+        @ConfigDefault("\"account_key\"")
+        AuthMethod getAuthMethod();
+
+        // auth_method: account_key
         @Config("account_key")
-        String getAccountKey();
+        @ConfigDefault("null")
+        Optional<String> getAccountKey();
+
+        // auth_method: service_principal
+        @Config("tenant_id")
+        @ConfigDefault("null")
+        Optional<String> getTenantId();
+
+        @Config("client_id")
+        @ConfigDefault("null")
+        Optional<String> getClientId();
+
+        @Config("client_secret")
+        @ConfigDefault("null")
+        Optional<String> getClientSecret();
+
+        // auth_method: sas_token
+        @Config("sas_token")
+        @ConfigDefault("null")
+        Optional<String> getSasToken();
 
         @Config("container")
         String getContainer();
@@ -100,6 +122,7 @@ public class AzureBlobStorageFileInputPlugin
     public ConfigDiff transaction(ConfigSource config, FileInputPlugin.Control control)
     {
         final PluginTask task = CONFIG_MAPPER.map(config, PluginTask.class);
+        AzureBlobClientFactory.validate(task);
         if (task.getProxy().isPresent()) {
             System.setProperty("jdk.http.auth.tunneling.disabledSchemes", "");
         }
@@ -127,22 +150,6 @@ public class AzureBlobStorageFileInputPlugin
     {
     }
 
-    private static CloudBlobClient newAzureClient(String accountName, String accountKey)
-    {
-        String connectionString = "DefaultEndpointsProtocol=https;" +
-                "AccountName=" + accountName + ";" +
-                "AccountKey=" + accountKey;
-
-        CloudStorageAccount account;
-        try {
-            account = CloudStorageAccount.parse(connectionString);
-        }
-        catch (InvalidKeyException | URISyntaxException ex) {
-            throw new ConfigException(ex);
-        }
-        return account.createCloudBlobClient();
-    }
-
     private FileList listFiles(PluginTask task)
     {
         if (task.getPathPrefix().equals("/")) {
@@ -150,8 +157,8 @@ public class AzureBlobStorageFileInputPlugin
         }
         FileList.Builder builder = new FileList.Builder(task);
 
-        FileList fileList = listFilesWithPrefix(builder, task.getAccountName(), task.getAccountKey(), task.getContainer(), task.getPathPrefix(),
-                                    task.getLastPath(), task.getMaxResults(), task.getMaxConnectionRetry(), task.getProxy().orElse(null));
+        FileList fileList = listFilesWithPrefix(builder, new AzureBlobClientFactory(task), task.getContainer(), task.getPathPrefix(),
+                                    task.getLastPath(), task.getMaxResults(), task.getMaxConnectionRetry());
 
         if (fileList.getTaskCount() == 0 && task.getStopWhenFileNotFound()) {
             throw new ConfigException("No file is found. \"stop_when_file_not_found\" option is \"true\".");
@@ -161,12 +168,12 @@ public class AzureBlobStorageFileInputPlugin
 
     }
 
-    private static FileList listFilesWithPrefix(final FileList.Builder builder, final String accountName, final String accountKey,
+    private static FileList listFilesWithPrefix(final FileList.Builder builder, final AzureBlobClientFactory clientFactory,
                                                 final String containerName, final String prefix, final Optional<String> lastPath,
-                                                final int maxResults, final int maxConnectionRetry, ProxyTask proxyTask)
+                                                final int maxResults, final int maxConnectionRetry)
     {
         final String lastKey = (lastPath.isPresent() && !lastPath.get().isEmpty()) ? createNextToken(lastPath.get()) : null;
-        final OperationContext op = ProxyTask.toOperationContext(proxyTask);
+        final OperationContext op = clientFactory.createOperationContext();
         try {
             return RetryExecutor.builder()
                     .withRetryLimit(maxConnectionRetry)
@@ -176,7 +183,7 @@ public class AzureBlobStorageFileInputPlugin
                         @Override
                         public FileList call() throws StorageException, URISyntaxException, IOException
                         {
-                            CloudBlobClient client = newAzureClient(accountName, accountKey);
+                            CloudBlobClient client = clientFactory.createClient();
                             ResultContinuation token = null;
                             if (lastKey != null) {
                                 token = new ResultContinuation();
@@ -194,7 +201,8 @@ public class AzureBlobStorageFileInputPlugin
                                 for (ListBlobItem blobItem : blobs.getResults()) {
                                     if (blobItem instanceof CloudBlob) {
                                         CloudBlob blob = (CloudBlob) blobItem;
-                                        if (blob.exists() && !blob.getUri().toString().endsWith("/")) {
+                                        // Pass the context so this request also uses a refreshed token (service_principal)
+                                        if (blob.exists(null, null, op) && !blob.getUri().toString().endsWith("/")) {
                                             if (lastPath.isPresent()
                                                     && !lastPath.get().isEmpty()
                                                     && blob.getName().equals(lastPath.get())) {
@@ -284,11 +292,12 @@ public class AzureBlobStorageFileInputPlugin
 
         public SingleFileProvider(PluginTask task, int taskIndex)
         {
-            this.client = newAzureClient(task.getAccountName(), task.getAccountKey());
+            AzureBlobClientFactory clientFactory = new AzureBlobClientFactory(task);
+            this.client = clientFactory.createClient();
             this.containerName = task.getContainer();
             this.iterator = task.getFiles().get(taskIndex).iterator();
             this.maxConnectionRetry = task.getMaxConnectionRetry();
-            this.op = ProxyTask.toOperationContext(task.getProxy().orElse(null));
+            this.op = clientFactory.createOperationContext();
         }
 
         @Override

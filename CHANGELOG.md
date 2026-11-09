@@ -1,3 +1,6 @@
+## Unreleased (trocco)
+* [new feature] Support `auth_method` option: `service_principal` (Microsoft Entra ID client credentials) and `sas_token`, in addition to `account_key`. Existing configurations keep using `account_key`.
+
 ## 0.3.2 - 2022-02-14
 * [maintenance] enhance skip file logic to skip a file in the last_path only if this file exists in the azure blob storage.
 
