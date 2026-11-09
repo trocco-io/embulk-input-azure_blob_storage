@@ -19,7 +19,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Creates the Azure Blob Storage client and the per-request context for the configured auth method.
  *
- * - account_key: the same connection string as before, so existing configurations behave exactly as they did.
+ * - account_key: uses the same connection string and credentials as before.
  * - sas_token: the SAS token is sent as the query string of each request.
  * - service_principal: an access token from Microsoft Entra ID is sent as a bearer token. The token is refreshed
  *   right before a request is signed when it is about to expire, so long transfers don't fail halfway.
@@ -34,8 +34,8 @@ public class AzureBlobClientFactory
     private final ServicePrincipalTokenProvider tokenProvider;
     private StorageCredentialsToken tokenCredentials;
 
-    // Tasks run in parallel in the same JVM. They share one token per service principal instead of each asking
-    // Entra ID for its own, which could hit its rate limit when many tasks start at once.
+    // Tasks run in parallel in the same JVM. They share one token per service principal, secret and proxy settings
+    // instead of each asking Entra ID for its own, which could hit its rate limit when many tasks start at once.
     private static final ConcurrentHashMap<String, ServicePrincipalTokenProvider> TOKEN_PROVIDERS = new ConcurrentHashMap<>();
 
     public AzureBlobClientFactory(PluginTask task)
@@ -108,7 +108,7 @@ public class AzureBlobClientFactory
         return op;
     }
 
-    private static ServicePrincipalTokenProvider sharedTokenProvider(PluginTask task)
+    static ServicePrincipalTokenProvider sharedTokenProvider(PluginTask task)
     {
         final String tenantId = required(task.getTenantId(), "tenant_id");
         final String clientId = required(task.getClientId(), "client_id");
@@ -116,6 +116,8 @@ public class AzureBlobClientFactory
         final ProxyTask proxyTask = task.getProxy().orElse(null);
         // The secret is part of the key so that a changed secret gets a new token, and the proxy so that a job with
         // other proxy settings doesn't reuse a provider bound to the first job's proxy. The key stays in memory only.
+        // Note that proxy credentials are given through a JVM-wide Authenticator (as the Azure SDK also does), so
+        // jobs with different proxy users in one JVM are not isolated from each other.
         String proxyKey = proxyTask == null ? "-" : String.join("\u0000", proxyTask.getType().name(),
                 proxyTask.getHost().orElse(""), String.valueOf(proxyTask.getPort()),
                 proxyTask.getUser().orElse(""), proxyTask.getPassword().orElse(""));

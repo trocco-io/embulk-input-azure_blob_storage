@@ -192,6 +192,17 @@ public class TestServicePrincipalTokenProvider
         assertEquals(1, requestCount.get());
     }
 
+    @Test
+    public void testShortLivedTokenIsNotExtended()
+    {
+        // Shorter than the refresh margin: fetched again for each request instead of being assumed valid for an hour.
+        responseBody = "{\"access_token\":\"short\",\"expires_in\":240}";
+        ServicePrincipalTokenProvider provider = provider();
+        assertEquals("short", provider.getToken());
+        assertEquals("short", provider.getToken());
+        assertEquals(2, requestCount.get());
+    }
+
     // For HTTPS, Java opens a tunnel with CONNECT. The proxy credentials have to be sent with it.
     @Test
     public void testSendsProxyCredentialsWhenOpeningTunnel() throws Exception

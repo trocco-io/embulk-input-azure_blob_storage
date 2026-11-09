@@ -35,7 +35,7 @@ public class ServicePrincipalTokenProvider
     static final String STORAGE_SCOPE = "https://storage.azure.com/.default";
     // Refresh the token this long before it expires, so a request never goes out with a token about to expire.
     static final long REFRESH_MARGIN_MILLIS = 5 * 60 * 1000L;
-    // Used when the response has no usable expires_in. Entra ID tokens are valid for at least an hour.
+    // Used only when the response has no expires_in.
     static final long DEFAULT_EXPIRES_IN_SECONDS = 3600L;
     // Attempts for errors that may go away on retry (network errors, 429 and 5xx).
     static final int MAX_ATTEMPTS = 3;
@@ -184,11 +184,12 @@ public class ServicePrincipalTokenProvider
         }
     }
 
+    // A lifetime shorter than the refresh margin is kept as is: the token is then fetched again for each request.
     private static long expiresInSeconds(JsonNode json)
     {
         long expiresIn = json.path("expires_in").asLong(0);
-        if (expiresIn * 1000L <= REFRESH_MARGIN_MILLIS) {
-            log.warn("The access token has no usable expires_in ({}). Assume it is valid for {} seconds.", expiresIn, DEFAULT_EXPIRES_IN_SECONDS);
+        if (expiresIn <= 0) {
+            log.warn("The access token response has no expires_in. Assume the token is valid for {} seconds.", DEFAULT_EXPIRES_IN_SECONDS);
             return DEFAULT_EXPIRES_IN_SECONDS;
         }
         return expiresIn;
@@ -216,7 +217,9 @@ public class ServicePrincipalTokenProvider
         if (proxyTask == null || !proxyTask.getUser().isPresent()) {
             return;
         }
-        // Basic authentication for the tunnel is disabled by default since Java 8u111.
+        // Basic authentication for the tunnel is disabled by default since Java 8u111. This is read only once, when
+        // the JVM's HTTP client is first loaded, so it has an effect only before the first HTTP connection.
+        // transaction() also sets it at the start when a proxy is configured.
         System.setProperty("jdk.http.auth.tunneling.disabledSchemes", "");
         final String user = proxyTask.getUser().get();
         final char[] password = proxyTask.getPassword().orElse("").toCharArray();

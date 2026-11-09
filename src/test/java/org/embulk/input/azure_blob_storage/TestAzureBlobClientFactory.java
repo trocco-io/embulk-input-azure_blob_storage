@@ -19,6 +19,8 @@ import static org.embulk.input.azure_blob_storage.AzureBlobStorageFileInputPlugi
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -132,6 +134,26 @@ public class TestAzureBlobClientFactory
         PluginTask restored = AzureBlobStorageFileInputPlugin.CONFIG_MAPPER_FACTORY.createTaskMapper()
                 .map(defaulted.toTaskSource(), PluginTask.class);
         assertEquals(AuthMethod.ACCOUNT_KEY, restored.getAuthMethod());
+    }
+
+    // Providers are shared per service principal, secret and proxy settings, so that a job never uses another job's
+    // token or proxy.
+    @Test
+    public void testSharedTokenProviderKey()
+    {
+        ConfigSource base = baseConfig().set("auth_method", "service_principal")
+                .set("tenant_id", "shared-t").set("client_id", "shared-c").set("client_secret", "shared-s");
+        ServicePrincipalTokenProvider provider = AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy()));
+
+        assertSame(provider, AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy())));
+        assertNotSame(provider, AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy().set("tenant_id", "other"))));
+        assertNotSame(provider, AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy().set("client_id", "other"))));
+        assertNotSame(provider, AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy().set("client_secret", "other"))));
+        ServicePrincipalTokenProvider withProxy = AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy().set("proxy",
+                runtime.getExec().newConfigSource().set("type", "http").set("host", "proxy-a").set("port", 8080))));
+        assertNotSame(provider, withProxy);
+        assertNotSame(withProxy, AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy().set("proxy",
+                runtime.getExec().newConfigSource().set("type", "http").set("host", "proxy-b").set("port", 8080)))));
     }
 
     private ConfigSource proxyConfig()

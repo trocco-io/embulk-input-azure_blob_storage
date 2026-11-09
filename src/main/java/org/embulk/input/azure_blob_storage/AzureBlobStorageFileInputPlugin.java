@@ -298,7 +298,12 @@ public class AzureBlobStorageFileInputPlugin
 
         public SingleFileProvider(PluginTask task, int taskIndex)
         {
-            this.clientFactory = new AzureBlobClientFactory(task);
+            this(task, taskIndex, new AzureBlobClientFactory(task));
+        }
+
+        SingleFileProvider(PluginTask task, int taskIndex, AzureBlobClientFactory clientFactory)
+        {
+            this.clientFactory = clientFactory;
             this.containerName = task.getContainer();
             this.iterator = task.getFiles().get(taskIndex).iterator();
             this.maxConnectionRetry = task.getMaxConnectionRetry();
@@ -392,6 +397,12 @@ public class AzureBlobStorageFileInputPlugin
             if (details != null && details.getAdditionalDetails() != null) {
                 details.getAdditionalDetails().forEach((key, values) ->
                         message.append(" ").append(key).append(": ").append(String.join(", ", values)));
+            }
+            // When something fails inside the SDK before the request is sent (e.g. refreshing the access token), the SDK
+            // still reports the status of the request it then sent unsigned. Show the original error too.
+            Throwable inner = storageException.getCause();
+            if (inner != null && !(inner instanceof StorageException) && inner.getMessage() != null) {
+                message.append(" Caused by: ").append(inner.getMessage());
             }
             int status = storageException.getHttpStatusCode();
             if (status == 401 || status == 403) {
