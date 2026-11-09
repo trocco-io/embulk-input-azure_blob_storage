@@ -199,12 +199,17 @@ public class AzureBlobStorageFileInputPlugin
                                 // A new context for each page, as the SDK keeps the result of every request in it
                                 final OperationContext op = clientFactory.createOperationContext();
                                 blobs = container.listBlobsSegmented(prefix, true, null, maxResults, token, null, op);
+                                // For the existence check of each blob, without the SDK's request logging that a proxy turns on
+                                final OperationContext existsOp = clientFactory.createOperationContext();
+                                if (existsOp != null) {
+                                    existsOp.setLoggingEnabled(false);
+                                }
                                 log.debug(String.format("result count(include directory):%s continuationToken:%s", blobs.getLength(), blobs.getContinuationToken()));
                                 for (ListBlobItem blobItem : blobs.getResults()) {
                                     if (blobItem instanceof CloudBlob) {
                                         CloudBlob blob = (CloudBlob) blobItem;
                                         // Pass the context so this request also uses a refreshed token (service_principal)
-                                        if (blob.exists(null, null, op) && !blob.getUri().toString().endsWith("/")) {
+                                        if (blob.exists(null, null, existsOp) && !blob.getUri().toString().endsWith("/")) {
                                             if (lastPath.isPresent()
                                                     && !lastPath.get().isEmpty()
                                                     && blob.getName().equals(lastPath.get())) {
@@ -285,21 +290,18 @@ public class AzureBlobStorageFileInputPlugin
     class SingleFileProvider
             implements InputStreamFileInput.Provider
     {
-        private CloudBlobClient client;
+        private final AzureBlobClientFactory clientFactory;
         private final String containerName;
         private final Iterator<String> iterator;
         private final int maxConnectionRetry;
         private boolean opened = false;
-        private final OperationContext op;
 
         public SingleFileProvider(PluginTask task, int taskIndex)
         {
-            AzureBlobClientFactory clientFactory = new AzureBlobClientFactory(task);
-            this.client = clientFactory.createClient();
+            this.clientFactory = new AzureBlobClientFactory(task);
             this.containerName = task.getContainer();
             this.iterator = task.getFiles().get(taskIndex).iterator();
             this.maxConnectionRetry = task.getMaxConnectionRetry();
-            this.op = clientFactory.createOperationContext();
         }
 
         @Override
@@ -319,6 +321,9 @@ public class AzureBlobStorageFileInputPlugin
                             @Override
                             public InputStreamFileInput.InputStreamWithHints call() throws StorageException, URISyntaxException, IOException
                             {
+                                // Created here so that getting an access token (service_principal) is retried like the request
+                                CloudBlobClient client = clientFactory.createClient();
+                                OperationContext op = clientFactory.createOperationContext();
                                 CloudBlobContainer container = client.getContainerReference(containerName);
                                 CloudBlob blob = container.getBlockBlobReference(key);
                                 return new InputStreamFileInput.InputStreamWithHints(

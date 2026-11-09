@@ -14,6 +14,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.security.InvalidKeyException;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Creates the Azure Blob Storage client and the per-request context for the configured auth method.
@@ -33,15 +34,13 @@ public class AzureBlobClientFactory
     private final ServicePrincipalTokenProvider tokenProvider;
     private StorageCredentialsToken tokenCredentials;
 
+    // Tasks run in parallel in the same JVM. They share one token per service principal instead of each asking
+    // Entra ID for its own, which could hit its rate limit when many tasks start at once.
+    private static final ConcurrentHashMap<String, ServicePrincipalTokenProvider> TOKEN_PROVIDERS = new ConcurrentHashMap<>();
+
     public AzureBlobClientFactory(PluginTask task)
     {
-        this(task, task.getAuthMethod() == AuthMethod.SERVICE_PRINCIPAL
-                ? new ServicePrincipalTokenProvider(
-                        required(task.getTenantId(), "tenant_id"),
-                        required(task.getClientId(), "client_id"),
-                        required(task.getClientSecret(), "client_secret"),
-                        task.getProxy().orElse(null))
-                : null);
+        this(task, task.getAuthMethod() == AuthMethod.SERVICE_PRINCIPAL ? sharedTokenProvider(task) : null);
     }
 
     AzureBlobClientFactory(PluginTask task, ServicePrincipalTokenProvider tokenProvider)
@@ -107,6 +106,17 @@ public class AzureBlobClientFactory
             }
         });
         return op;
+    }
+
+    private static ServicePrincipalTokenProvider sharedTokenProvider(PluginTask task)
+    {
+        final String tenantId = required(task.getTenantId(), "tenant_id");
+        final String clientId = required(task.getClientId(), "client_id");
+        final String clientSecret = required(task.getClientSecret(), "client_secret");
+        // The secret is part of the key so that a changed secret gets a new token. The key stays in memory only.
+        String key = tenantId + "\u0000" + clientId + "\u0000" + clientSecret;
+        return TOKEN_PROVIDERS.computeIfAbsent(key,
+                k -> new ServicePrincipalTokenProvider(tenantId, clientId, clientSecret, task.getProxy().orElse(null)));
     }
 
     private synchronized StorageCredentialsToken tokenCredentials()

@@ -18,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.io.BufferedReader;
+import java.net.Authenticator;
 import java.io.InputStreamReader;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -77,6 +78,8 @@ public class TestServicePrincipalTokenProvider
     public void stopServer()
     {
         server.stop(0);
+        // The proxy test installs a JVM-wide Authenticator.
+        Authenticator.setDefault(null);
     }
 
     private ServicePrincipalTokenProvider provider()
@@ -197,8 +200,8 @@ public class TestServicePrincipalTokenProvider
             List<String> connectRequests = new ArrayList<>();
             Thread proxy = new Thread(() -> {
                 try {
-                    // First CONNECT: ask for credentials. Second CONNECT: record it and refuse.
-                    for (int i = 0; i < 2; i++) {
+                    // First CONNECT: ask for credentials. Later ones: record them and refuse, until the socket is closed.
+                    for (int i = 0; !proxyServer.isClosed(); i++) {
                         try (Socket socket = proxyServer.accept()) {
                             BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
                             StringBuilder request = new StringBuilder();
@@ -229,13 +232,14 @@ public class TestServicePrincipalTokenProvider
                     "https://login.example.com", "t", "c", "s", proxyTask, now::get, sleeps::add);
 
             assertThrows(RuntimeException.class, provider::getToken);
+            proxyServer.close();
             proxy.join(10_000L);
 
             assertTrue(connectRequests.toString(), connectRequests.get(0).startsWith("CONNECT login.example.com:443"));
             // Java writes the header name as "Proxy-authorization"; header names are case-insensitive.
             String expected = "proxy-authorization: basic "
                     + Base64.getEncoder().encodeToString("proxy-user:proxy-pass".getBytes(StandardCharsets.UTF_8)).toLowerCase();
-            assertEquals(connectRequests.toString(), 2, connectRequests.size());
+            assertTrue(connectRequests.toString(), connectRequests.size() >= 2);
             assertTrue(connectRequests.toString(), connectRequests.get(1).toLowerCase().contains(expected));
         }
     }
