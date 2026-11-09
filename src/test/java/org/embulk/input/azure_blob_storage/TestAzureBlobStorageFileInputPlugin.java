@@ -138,7 +138,16 @@ public class TestAzureBlobStorageFileInputPlugin
                 .set("last_path", "")
                 .set("parser", parserConfig(schemaConfig()));
 
-        runInputAndExpect(config, "Field 'account_key' is required but not set.");
+        // account_key is optional in the config since auth_method was added, and required only for account_key.
+        try {
+            embulk.runInput(config, embulk.createTempFile("csv"));
+        }
+        catch (final PartialExecutionException ex) {
+            assertTrue(ex.getCause() instanceof ConfigException);
+            assertEquals("'account_key' is required for this 'auth_method'.", ex.getCause().getMessage());
+            return;
+        }
+        fail("Expected Exception was not thrown.");
     }
 
     @Test
@@ -158,14 +167,10 @@ public class TestAzureBlobStorageFileInputPlugin
 
     @Test
     public void testAzureClientCreateSuccessfully()
-            throws NoSuchMethodException,
-            IllegalAccessException, InvocationTargetException
     {
         PluginTask task = CONFIG_MAPPER.map(config(), PluginTask.class);
 
-        Method method = AzureBlobStorageFileInputPlugin.class.getDeclaredMethod("newAzureClient", String.class, String.class);
-        method.setAccessible(true);
-        method.invoke(plugin, task.getAccountName(), task.getAccountKey()); // no errors happens
+        assertNotNull(new AzureBlobClientFactory(task).createClient()); // no errors happens
     }
 
     @Test

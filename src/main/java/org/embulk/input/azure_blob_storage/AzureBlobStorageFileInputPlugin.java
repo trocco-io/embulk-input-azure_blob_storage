@@ -35,6 +35,7 @@ import com.microsoft.azure.storage.ResultContinuation;
 import com.microsoft.azure.storage.ResultContinuationType;
 import com.microsoft.azure.storage.ResultSegment;
 import com.microsoft.azure.storage.StorageException;
+import com.microsoft.azure.storage.StorageExtendedErrorInformation;
 import com.microsoft.azure.storage.blob.CloudBlob;
 import com.microsoft.azure.storage.blob.CloudBlobClient;
 import com.microsoft.azure.storage.blob.CloudBlobContainer;
@@ -173,7 +174,6 @@ public class AzureBlobStorageFileInputPlugin
                                                 final int maxResults, final int maxConnectionRetry)
     {
         final String lastKey = (lastPath.isPresent() && !lastPath.get().isEmpty()) ? createNextToken(lastPath.get()) : null;
-        final OperationContext op = clientFactory.createOperationContext();
         try {
             return RetryExecutor.builder()
                     .withRetryLimit(maxConnectionRetry)
@@ -196,6 +196,8 @@ public class AzureBlobStorageFileInputPlugin
                             CloudBlobContainer container = client.getContainerReference(containerName);
                             ResultSegment<ListBlobItem> blobs;
                             do {
+                                // A new context for each page, as the SDK keeps the result of every request in it
+                                final OperationContext op = clientFactory.createOperationContext();
                                 blobs = container.listBlobsSegmented(prefix, true, null, maxResults, token, null, op);
                                 log.debug(String.format("result count(include directory):%s continuationToken:%s", blobs.getLength(), blobs.getContinuationToken()));
                                 for (ListBlobItem blobItem : blobs.getResults()) {
@@ -222,7 +224,7 @@ public class AzureBlobStorageFileInputPlugin
                         @Override
                         public boolean isRetryableException(Exception exception)
                         {
-                            return true;
+                            return isRetryable(exception);
                         }
 
                         @Override
@@ -247,7 +249,7 @@ public class AzureBlobStorageFileInputPlugin
                     });
         }
         catch (RetryGiveupException ex) {
-            throw new DataException(ex.getCause());
+            throw toUserException(ex.getCause());
         }
         catch (InterruptedException ex) {
             throw new DataException(ex);
@@ -328,7 +330,7 @@ public class AzureBlobStorageFileInputPlugin
                             @Override
                             public boolean isRetryableException(Exception exception)
                             {
-                                return true;
+                                return isRetryable(exception);
                             }
 
                             @Override
@@ -353,7 +355,7 @@ public class AzureBlobStorageFileInputPlugin
                         });
             }
             catch (RetryGiveupException ex) {
-                throw new DataException(ex.getCause());
+                throw toUserException(ex.getCause());
             }
             catch (InterruptedException ex) {
                 throw new DataException(ex);
@@ -362,6 +364,50 @@ public class AzureBlobStorageFileInputPlugin
 
         @Override
         public void close() {}
+    }
+
+    // Configuration errors (e.g. a wrong client secret) don't go away on retry. Everything else is retried as before.
+    static boolean isRetryable(Throwable exception)
+    {
+        return findConfigException(exception) == null;
+    }
+
+    // Makes the final error say why the request failed, instead of only the SDK's generic message.
+    static RuntimeException toUserException(Throwable cause)
+    {
+        ConfigException configException = findConfigException(cause);
+        if (configException != null) {
+            return configException;
+        }
+        if (cause instanceof StorageException) {
+            StorageException storageException = (StorageException) cause;
+            StringBuilder message = new StringBuilder(String.format("Azure Blob Storage request failed (status: %d, code: %s): %s",
+                    storageException.getHttpStatusCode(), storageException.getErrorCode(), storageException.getMessage()));
+            StorageExtendedErrorInformation details = storageException.getExtendedErrorInformation();
+            if (details != null && details.getAdditionalDetails() != null) {
+                details.getAdditionalDetails().forEach((key, values) ->
+                        message.append(" ").append(key).append(": ").append(String.join(", ", values)));
+            }
+            int status = storageException.getHttpStatusCode();
+            if (status == 401 || status == 403) {
+                message.append(" Check the credentials for 'auth_method' (wrong or expired key or SAS token, or missing role or permission).");
+            }
+            return new DataException(message.toString(), storageException);
+        }
+        return new DataException(cause);
+    }
+
+    private static ConfigException findConfigException(Throwable exception)
+    {
+        for (Throwable t = exception; t != null; t = t.getCause()) {
+            if (t instanceof ConfigException) {
+                return (ConfigException) t;
+            }
+            if (t.getCause() == t) {
+                break;
+            }
+        }
+        return null;
     }
 
     private static String createNextToken(String path)

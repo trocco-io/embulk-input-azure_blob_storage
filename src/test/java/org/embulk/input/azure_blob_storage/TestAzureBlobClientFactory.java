@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.embulk.input.azure_blob_storage.AzureBlobStorageFileInputPlugin.CONFIG_MAPPER;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
@@ -72,13 +73,7 @@ public class TestAzureBlobClientFactory
         PluginTask task = task(baseConfig().set("auth_method", "service_principal")
                 .set("tenant_id", "t").set("client_id", "c").set("client_secret", "s"));
         AtomicInteger calls = new AtomicInteger();
-        ServicePrincipalTokenProvider provider = new ServicePrincipalTokenProvider("http://unused", "t", "c", "s", null, () -> 0L) {
-            @Override
-            public synchronized String getToken()
-            {
-                return "token-" + calls.incrementAndGet();
-            }
-        };
+        ServicePrincipalTokenProvider provider = stubProvider(calls);
         AzureBlobClientFactory factory = new AzureBlobClientFactory(task, provider);
 
         CloudBlobClient client = factory.createClient();
@@ -90,6 +85,70 @@ public class TestAzureBlobClientFactory
         // The SDK fires this event right before it signs a request.
         op.getSendingRequestEventHandler().fireEvent(new SendingRequestEvent(op, null, null));
         assertEquals("token-2", credentials.getToken());
+    }
+
+    @Test
+    public void testServicePrincipalKeepsProxySettings()
+    {
+        PluginTask task = task(baseConfig().set("auth_method", "service_principal")
+                .set("tenant_id", "t").set("client_id", "c").set("client_secret", "s")
+                .set("proxy", proxyConfig()));
+        AtomicInteger calls = new AtomicInteger();
+        AzureBlobClientFactory factory = new AzureBlobClientFactory(task, stubProvider(calls));
+        CloudBlobClient client = factory.createClient();
+
+        OperationContext op = factory.createOperationContext();
+        assertEquals("proxy-host:8080", op.getProxy().address().toString());
+        assertEquals("user", op.getProxyUsername());
+        assertEquals("pass", op.getProxyPassword());
+        op.getSendingRequestEventHandler().fireEvent(new SendingRequestEvent(op, null, null));
+        assertEquals("token-2", ((StorageCredentialsToken) client.getCredentials()).getToken());
+    }
+
+    @Test
+    public void testSasTokenWithProxyDoesNotLogRequestUrls()
+    {
+        PluginTask task = task(baseConfig().set("auth_method", "sas_token").set("sas_token", "sv=1&sig=abc")
+                .set("proxy", proxyConfig()));
+
+        OperationContext op = new AzureBlobClientFactory(task).createOperationContext();
+        assertNotNull(op.getProxy());
+        assertFalse(op.isLoggingEnabled());
+    }
+
+    // resume() and open() read the task back from the TaskSource.
+    @Test
+    public void testAuthMethodSurvivesTaskSourceRoundTrip()
+    {
+        for (String method : new String[] {"account_key", "service_principal", "sas_token"}) {
+            PluginTask task = task(baseConfig().set("auth_method", method).set("account_key", "a2V5"));
+            task.setFiles(new FileList.Builder(task).build());
+            PluginTask restored = AzureBlobStorageFileInputPlugin.CONFIG_MAPPER_FACTORY.createTaskMapper()
+                    .map(task.toTaskSource(), PluginTask.class);
+            assertEquals(task.getAuthMethod(), restored.getAuthMethod());
+        }
+        PluginTask defaulted = task(baseConfig().set("account_key", "a2V5"));
+        defaulted.setFiles(new FileList.Builder(defaulted).build());
+        PluginTask restored = AzureBlobStorageFileInputPlugin.CONFIG_MAPPER_FACTORY.createTaskMapper()
+                .map(defaulted.toTaskSource(), PluginTask.class);
+        assertEquals(AuthMethod.ACCOUNT_KEY, restored.getAuthMethod());
+    }
+
+    private ConfigSource proxyConfig()
+    {
+        return runtime.getExec().newConfigSource()
+                .set("type", "http").set("host", "proxy-host").set("port", 8080).set("user", "user").set("password", "pass");
+    }
+
+    private static ServicePrincipalTokenProvider stubProvider(AtomicInteger calls)
+    {
+        return new ServicePrincipalTokenProvider("http://unused", "t", "c", "s", null, () -> 0L, millis -> { }) {
+            @Override
+            public synchronized String getToken()
+            {
+                return "token-" + calls.incrementAndGet();
+            }
+        };
     }
 
     @Test

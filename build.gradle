@@ -72,7 +72,7 @@ dependencies {
     compile 'com.google.guava:guava:18.0'
     compile 'org.apache.commons:commons-lang3:3.4'
 
-    testCompile "junit:junit:4.12"
+    testCompile "junit:junit:4.13.2"
     testCompile "org.embulk:embulk-core:$embulkVersion"
     testCompile "org.embulk:embulk-core:$embulkVersion:tests"
     testCompile "org.embulk:embulk-deps:$embulkVersion"
@@ -84,6 +84,9 @@ dependencies {
 
 test {
     jvmArgs '-XX:MaxPermSize=128M', '-Xmx2048m'
+    // Java reads this only once per JVM, when its HTTP client is first loaded. The plugin sets it at the start of a
+    // transaction when a proxy is configured; tests that use a proxy with credentials need it from the start.
+    systemProperty 'jdk.http.auth.tunneling.disabledSchemes', ''
     testLogging {
         events "passed", "skipped", "failed"
     }

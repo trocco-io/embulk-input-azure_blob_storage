@@ -1,6 +1,7 @@
 package org.embulk.input.azure_blob_storage;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonValue;
 import org.embulk.config.ConfigException;
 
 import java.util.Arrays;
@@ -22,6 +23,8 @@ public enum AuthMethod
         this.value = value;
     }
 
+    // Written to the TaskSource as the config value, so that it can be read back by of() in resume() and open().
+    @JsonValue
     public String getValue()
     {
         return value;

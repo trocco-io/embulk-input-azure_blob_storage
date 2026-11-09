@@ -80,12 +80,17 @@ public class AzureBlobClientFactory
     }
 
     /**
-     * Returns the context to pass to every request. It is null when neither a proxy nor token refreshing is needed,
-     * which is the same as before this class was added.
+     * Returns a new context to pass to requests. It is null when neither a proxy nor token refreshing is needed,
+     * which is the same as before this class was added. The SDK keeps the result of every request in the context,
+     * so create a new one for each group of requests instead of sharing one for a whole listing.
      */
     public OperationContext createOperationContext()
     {
         OperationContext op = ProxyTask.toOperationContext(proxyTask);
+        if (op != null && authMethod == AuthMethod.SAS_TOKEN) {
+            // The SDK logs each request URL at INFO when logging is enabled, and the URL contains the SAS signature.
+            op.setLoggingEnabled(false);
+        }
         if (authMethod != AuthMethod.SERVICE_PRINCIPAL) {
             return op;
         }
