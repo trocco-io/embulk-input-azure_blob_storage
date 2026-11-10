@@ -48,8 +48,9 @@ public class AzureBlobClientFactory
         this.accountName = task.getAccountName();
         this.authMethod = task.getAuthMethod();
         this.proxyTask = task.getProxy().orElse(null);
-        this.accountKey = authMethod == AuthMethod.ACCOUNT_KEY ? required(task.getAccountKey(), "account_key") : null;
-        this.sasToken = authMethod == AuthMethod.SAS_TOKEN ? normalizeSasToken(required(task.getSasToken(), "sas_token")) : null;
+        // The account key is used as it is, as before. The new options are trimmed (see required()).
+        this.accountKey = authMethod == AuthMethod.ACCOUNT_KEY ? requiredUntrimmed(task.getAccountKey(), "account_key", authMethod) : null;
+        this.sasToken = authMethod == AuthMethod.SAS_TOKEN ? normalizeSasToken(required(task.getSasToken(), "sas_token", authMethod)) : null;
         this.tokenProvider = tokenProvider;
     }
 
@@ -58,11 +59,18 @@ public class AzureBlobClientFactory
      */
     public static void validate(PluginTask task)
     {
+        // Checked first, because the token provider of service_principal uses the proxy when it is created
+        if (task.getProxy().isPresent()) {
+            Optional<String> host = task.getProxy().get().getHost();
+            if (!host.isPresent() || host.get().trim().isEmpty()) {
+                throw new ConfigException("'host' is required in 'proxy'.");
+            }
+        }
         new AzureBlobClientFactory(task, null);
         if (task.getAuthMethod() == AuthMethod.SERVICE_PRINCIPAL) {
-            required(task.getTenantId(), "tenant_id");
-            required(task.getClientId(), "client_id");
-            required(task.getClientSecret(), "client_secret");
+            required(task.getTenantId(), "tenant_id", AuthMethod.SERVICE_PRINCIPAL);
+            required(task.getClientId(), "client_id", AuthMethod.SERVICE_PRINCIPAL);
+            required(task.getClientSecret(), "client_secret", AuthMethod.SERVICE_PRINCIPAL);
         }
     }
 
@@ -110,9 +118,9 @@ public class AzureBlobClientFactory
 
     static ServicePrincipalTokenProvider sharedTokenProvider(PluginTask task)
     {
-        final String tenantId = required(task.getTenantId(), "tenant_id");
-        final String clientId = required(task.getClientId(), "client_id");
-        final String clientSecret = required(task.getClientSecret(), "client_secret");
+        final String tenantId = required(task.getTenantId(), "tenant_id", AuthMethod.SERVICE_PRINCIPAL);
+        final String clientId = required(task.getClientId(), "client_id", AuthMethod.SERVICE_PRINCIPAL);
+        final String clientSecret = required(task.getClientSecret(), "client_secret", AuthMethod.SERVICE_PRINCIPAL);
         final ProxyTask proxyTask = task.getProxy().orElse(null);
         // The secret is part of the key so that a changed secret gets a new token, and the proxy so that a job with
         // other proxy settings doesn't reuse a provider bound to the first job's proxy. The key stays in memory only.
@@ -167,10 +175,16 @@ public class AzureBlobClientFactory
         return token.startsWith("?") ? token.substring(1) : token;
     }
 
-    private static String required(Optional<String> value, String name)
+    // Values copied from the Azure portal easily get a trailing space or newline, which Entra ID and Azure reject.
+    private static String required(Optional<String> value, String name, AuthMethod authMethod)
+    {
+        return requiredUntrimmed(value, name, authMethod).trim();
+    }
+
+    private static String requiredUntrimmed(Optional<String> value, String name, AuthMethod authMethod)
     {
         if (!value.isPresent() || value.get().trim().isEmpty()) {
-            throw new ConfigException("'" + name + "' is required for this 'auth_method'.");
+            throw new ConfigException("'" + name + "' is required when 'auth_method' is '" + authMethod.getValue() + "'.");
         }
         return value.get();
     }

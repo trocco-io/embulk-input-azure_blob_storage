@@ -156,9 +156,7 @@ public class AzureBlobStorageFileInputPlugin
         if (task.getPathPrefix().equals("/")) {
             log.info("Listing files with prefix \"/\". This doesn't mean all files in a bucket. If you intend to read all files, use \"path_prefix: ''\" (empty string) instead.");
         }
-        FileList.Builder builder = new FileList.Builder(task);
-
-        FileList fileList = listFilesWithPrefix(builder, new AzureBlobClientFactory(task), task.getContainer(), task.getPathPrefix(),
+        FileList fileList = listFilesWithPrefix(task, new AzureBlobClientFactory(task), task.getContainer(), task.getPathPrefix(),
                                     task.getLastPath(), task.getMaxResults(), task.getMaxConnectionRetry());
 
         if (fileList.getTaskCount() == 0 && task.getStopWhenFileNotFound()) {
@@ -169,7 +167,7 @@ public class AzureBlobStorageFileInputPlugin
 
     }
 
-    private static FileList listFilesWithPrefix(final FileList.Builder builder, final AzureBlobClientFactory clientFactory,
+    static FileList listFilesWithPrefix(final PluginTask task, final AzureBlobClientFactory clientFactory,
                                                 final String containerName, final String prefix, final Optional<String> lastPath,
                                                 final int maxResults, final int maxConnectionRetry)
     {
@@ -183,6 +181,8 @@ public class AzureBlobStorageFileInputPlugin
                         @Override
                         public FileList call() throws StorageException, URISyntaxException, IOException
                         {
+                            // A new list for each attempt, because a retry lists again from the first page
+                            final FileList.Builder builder = new FileList.Builder(task);
                             CloudBlobClient client = clientFactory.createClient();
                             ResultContinuation token = null;
                             if (lastKey != null) {

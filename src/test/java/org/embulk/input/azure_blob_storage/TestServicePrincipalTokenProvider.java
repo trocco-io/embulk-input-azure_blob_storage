@@ -180,6 +180,50 @@ public class TestServicePrincipalTokenProvider
         assertThrows(RuntimeException.class, provider::getToken);
     }
 
+    // While Entra ID is down, requests must not each run all the attempts again while holding the lock
+    @Test
+    public void testFailedRefreshIsNotRetriedForAWhile()
+    {
+        ServicePrincipalTokenProvider provider = provider();
+        assertEquals("token-1", provider.getToken());
+
+        now.addAndGet(3600_000L - ServicePrincipalTokenProvider.REFRESH_MARGIN_MILLIS + 1);
+        responseStatus = 503;
+        responseBody = "";
+        assertEquals("token-1", provider.getToken());
+        int requestsAfterFailure = requestCount.get();
+        assertEquals(1 + ServicePrincipalTokenProvider.MAX_ATTEMPTS, requestsAfterFailure);
+
+        // Within the interval: the current token without new requests
+        now.addAndGet(ServicePrincipalTokenProvider.REFRESH_RETRY_INTERVAL_MILLIS - 1);
+        assertEquals("token-1", provider.getToken());
+        assertEquals(requestsAfterFailure, requestCount.get());
+
+        // After the interval: tried again, and the new token is used once Entra ID is back
+        now.addAndGet(1);
+        responseStatus = 200;
+        responseBody = "{\"access_token\":\"token-new\",\"expires_in\":3600}";
+        assertEquals("token-new", provider.getToken());
+        assertEquals(requestsAfterFailure + 1, requestCount.get());
+    }
+
+    // Once the token has expired, a new one is requested even right after a failure
+    @Test
+    public void testExpiredTokenIsAlwaysRequestedAgain()
+    {
+        ServicePrincipalTokenProvider provider = provider();
+        assertEquals("token-1", provider.getToken());
+
+        now.addAndGet(3600_000L - 1000L);
+        responseStatus = 503;
+        responseBody = "";
+        assertEquals("token-1", provider.getToken());
+
+        now.addAndGet(2000L);
+        assertThrows(RuntimeException.class, provider::getToken);
+        assertEquals(1 + 2 * ServicePrincipalTokenProvider.MAX_ATTEMPTS, requestCount.get());
+    }
+
     @Test
     public void testMissingExpiresInFallsBackToDefault()
     {

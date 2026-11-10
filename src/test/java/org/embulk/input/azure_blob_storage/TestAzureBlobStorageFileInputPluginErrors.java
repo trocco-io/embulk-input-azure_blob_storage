@@ -1,7 +1,12 @@
 package org.embulk.input.azure_blob_storage;
 
+import com.microsoft.azure.storage.OperationContext;
+import com.microsoft.azure.storage.RetryNoRetry;
+import com.microsoft.azure.storage.StorageCredentialsAccountAndKey;
 import com.microsoft.azure.storage.StorageException;
 import com.microsoft.azure.storage.StorageExtendedErrorInformation;
+import com.microsoft.azure.storage.blob.CloudBlobClient;
+import com.sun.net.httpserver.HttpServer;
 import org.embulk.EmbulkTestRuntime;
 import org.embulk.config.ConfigException;
 import org.embulk.config.ConfigSource;
@@ -10,7 +15,16 @@ import org.embulk.spi.DataException;
 import org.junit.Rule;
 import org.junit.Test;
 
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
@@ -41,7 +55,7 @@ public class TestAzureBlobStorageFileInputPluginErrors
                     ran.set(true);
                     return Collections.emptyList();
                 }));
-        assertEquals("'account_key' is required for this 'auth_method'.", ex.getMessage());
+        assertEquals("'account_key' is required when 'auth_method' is 'account_key'.", ex.getMessage());
         assertFalse(ran.get());
     }
 
@@ -121,6 +135,91 @@ public class TestAzureBlobStorageFileInputPluginErrors
         ConfigException ex = assertThrows(ConfigException.class, provider::openNextWithHints);
         assertEquals("wrong client secret", ex.getMessage());
         assertEquals(1, calls.get());
+    }
+
+    // A retry lists again from the first page, so the files of the pages listed before the failure must not be added twice
+    @Test
+    public void testRetryOfListingDoesNotAddFilesTwice() throws IOException
+    {
+        AtomicInteger secondPageRequests = new AtomicInteger();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            String query = exchange.getRequestURI().getRawQuery();
+            int status = 200;
+            String body = "";
+            if ("HEAD".equals(exchange.getRequestMethod())) {
+                exchange.getResponseHeaders().add("Last-Modified", "Mon, 01 Jan 2024 00:00:00 GMT");
+                exchange.getResponseHeaders().add("ETag", "\"0x1\"");
+                exchange.getResponseHeaders().add("x-ms-blob-type", "BlockBlob");
+                exchange.sendResponseHeaders(200, -1);
+                exchange.close();
+                return;
+            }
+            if (query != null && query.contains("marker=page2")) {
+                if (secondPageRequests.incrementAndGet() == 1) {
+                    // The second page fails once, after the first page was listed
+                    status = 403;
+                    body = "<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>AuthenticationFailed</Code><Message>failed</Message></Error>";
+                }
+                else {
+                    body = listResponse("data/b.csv", null);
+                }
+            }
+            else if (path.endsWith("/my-container")) {
+                body = listResponse("data/a.csv", "page2");
+            }
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "application/xml");
+            exchange.sendResponseHeaders(status, bytes.length == 0 ? -1 : bytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(bytes);
+            }
+        });
+        server.start();
+        try {
+            PluginTask task = AzureBlobStorageFileInputPlugin.CONFIG_MAPPER.map(runtime.getExec().newConfigSource()
+                    .set("account_name", "myaccount").set("account_key", "a2V5")
+                    .set("container", "my-container").set("path_prefix", "data/"), PluginTask.class);
+            URI endpoint = URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/myaccount");
+            AzureBlobClientFactory factory = new AzureBlobClientFactory(task, null) {
+                @Override
+                public CloudBlobClient createClient()
+                {
+                    CloudBlobClient client = new CloudBlobClient(endpoint, new StorageCredentialsAccountAndKey("myaccount", "a2V5"));
+                    // Fail at once, so the retry of the plugin is the one tested
+                    client.getDefaultRequestOptions().setRetryPolicyFactory(new RetryNoRetry());
+                    return client;
+                }
+
+                @Override
+                public OperationContext createOperationContext()
+                {
+                    return null;
+                }
+            };
+
+            FileList fileList = AzureBlobStorageFileInputPlugin.listFilesWithPrefix(task, factory, "my-container", "data/",
+                    Optional.empty(), 1, 1);
+
+            List<String> paths = new ArrayList<>();
+            for (int i = 0; i < fileList.getTaskCount(); i++) {
+                paths.addAll(fileList.get(i));
+            }
+            assertEquals(2, secondPageRequests.get());
+            assertEquals(Arrays.asList("data/a.csv", "data/b.csv"), paths);
+        }
+        finally {
+            server.stop(0);
+        }
+    }
+
+    private static String listResponse(String name, String nextMarker)
+    {
+        return "<?xml version=\"1.0\" encoding=\"utf-8\"?><EnumerationResults ContainerName=\"my-container\"><Blobs><Blob>"
+                + "<Name>" + name + "</Name><Properties><Last-Modified>Mon, 01 Jan 2024 00:00:00 GMT</Last-Modified>"
+                + "<Etag>0x1</Etag><Content-Length>10</Content-Length><BlobType>BlockBlob</BlobType></Properties>"
+                + "</Blob></Blobs><NextMarker>" + (nextMarker == null ? "" : nextMarker) + "</NextMarker></EnumerationResults>";
     }
 
     private PluginTask taskWithOneFile(int maxConnectionRetry)

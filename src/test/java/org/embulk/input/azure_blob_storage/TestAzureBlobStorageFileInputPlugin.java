@@ -144,7 +144,7 @@ public class TestAzureBlobStorageFileInputPlugin
         }
         catch (final PartialExecutionException ex) {
             assertTrue(ex.getCause() instanceof ConfigException);
-            assertEquals("'account_key' is required for this 'auth_method'.", ex.getCause().getMessage());
+            assertEquals("'account_key' is required when 'auth_method' is 'account_key'.", ex.getCause().getMessage());
             return;
         }
         fail("Expected Exception was not thrown.");

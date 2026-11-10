@@ -185,6 +185,44 @@ public class TestAzureBlobClientFactory
     }
 
     @Test
+    public void testRequiredOptionErrorNamesTheAuthMethod()
+    {
+        // e.g. auth_method is forgotten and only sas_token is set
+        ConfigException ex = assertThrows(ConfigException.class,
+                () -> AzureBlobClientFactory.validate(task(baseConfig().set("sas_token", "sv=1&sig=abc"))));
+        assertEquals("'account_key' is required when 'auth_method' is 'account_key'.", ex.getMessage());
+
+        ex = assertThrows(ConfigException.class, () -> AzureBlobClientFactory.validate(task(baseConfig()
+                .set("auth_method", "service_principal").set("tenant_id", "t").set("client_id", "c"))));
+        assertEquals("'client_secret' is required when 'auth_method' is 'service_principal'.", ex.getMessage());
+    }
+
+    @Test
+    public void testProxyWithoutHostIsAConfigError()
+    {
+        ConfigSource proxyWithoutHost = runtime.getExec().newConfigSource().set("type", "http").set("port", 8080);
+        for (ConfigSource config : new ConfigSource[] {
+                baseConfig().set("account_key", "a2V5"),
+                baseConfig().set("auth_method", "service_principal").set("tenant_id", "t").set("client_id", "c").set("client_secret", "s"),
+        }) {
+            ConfigException ex = assertThrows(ConfigException.class,
+                    () -> AzureBlobClientFactory.validate(task(config.set("proxy", proxyWithoutHost))));
+            assertEquals("'host' is required in 'proxy'.", ex.getMessage());
+        }
+    }
+
+    // Values copied from the Azure portal easily get a trailing newline
+    @Test
+    public void testServicePrincipalOptionsAreTrimmed()
+    {
+        ConfigSource base = baseConfig().set("auth_method", "service_principal");
+        ServicePrincipalTokenProvider provider = AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy()
+                .set("tenant_id", "trim-t").set("client_id", "trim-c").set("client_secret", "trim-s")));
+        assertSame(provider, AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy()
+                .set("tenant_id", " trim-t\n").set("client_id", "trim-c\n").set("client_secret", "trim-s "))));
+    }
+
+    @Test
     public void testUnknownAuthMethod()
     {
         ConfigException ex = assertThrows(ConfigException.class, () -> AuthMethod.of("managed_identity"));

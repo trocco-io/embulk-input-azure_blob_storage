@@ -39,6 +39,10 @@ public class ServicePrincipalTokenProvider
     static final long DEFAULT_EXPIRES_IN_SECONDS = 3600L;
     // Attempts for errors that may go away on retry (network errors, 429 and 5xx).
     static final int MAX_ATTEMPTS = 3;
+    // After a failed refresh, keep using the current token for this long before trying again. Without it, every
+    // request would run all the attempts again while holding the lock, which nearly stops the transfer while Entra ID
+    // is unavailable.
+    static final long REFRESH_RETRY_INTERVAL_MILLIS = 30 * 1000L;
     private static final long RETRY_WAIT_MILLIS = 1000L;
     private static final int TIMEOUT_MILLIS = 30 * 1000;
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -54,6 +58,8 @@ public class ServicePrincipalTokenProvider
 
     private String accessToken;
     private long expiresAtMillis;
+    // Time of the last failed refresh, or -1 after a successful one
+    private long lastRefreshFailedAtMillis = -1;
 
     public ServicePrincipalTokenProvider(String tenantId, String clientId, String clientSecret, ProxyTask proxyTask)
     {
@@ -77,7 +83,8 @@ public class ServicePrincipalTokenProvider
     /**
      * Returns a valid access token, getting a new one when there is none yet or the current one is about to expire.
      * If getting a new one fails while the current one is still valid, the current one is returned, so a temporary
-     * error of Entra ID does not stop a transfer.
+     * error of Entra ID does not stop a transfer. After such a failure, the current token is returned without asking
+     * Entra ID again for REFRESH_RETRY_INTERVAL_MILLIS. Once the token has expired, a new one is always requested.
      */
     public synchronized String getToken()
     {
@@ -85,17 +92,28 @@ public class ServicePrincipalTokenProvider
         if (accessToken != null && now < expiresAtMillis - REFRESH_MARGIN_MILLIS) {
             return accessToken;
         }
+        if (hasValidToken(now) && lastRefreshFailedAtMillis >= 0
+                && now < lastRefreshFailedAtMillis + REFRESH_RETRY_INTERVAL_MILLIS) {
+            return accessToken;
+        }
         try {
             fetchToken();
+            lastRefreshFailedAtMillis = -1;
         }
         catch (RuntimeException ex) {
-            if (accessToken != null && now < expiresAtMillis) {
+            lastRefreshFailedAtMillis = clock.getAsLong();
+            if (hasValidToken(now)) {
                 log.warn("Failed to refresh the access token. Keep using the current token until it expires: {}", ex.getMessage());
                 return accessToken;
             }
             throw ex;
         }
         return accessToken;
+    }
+
+    private boolean hasValidToken(long now)
+    {
+        return accessToken != null && now < expiresAtMillis;
     }
 
     private void fetchToken()
