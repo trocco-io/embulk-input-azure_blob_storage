@@ -70,8 +70,7 @@ public class TestAzureBlobStorageFileInputPluginErrors
         assertTrue(ex instanceof DataException);
         assertTrue(ex.getMessage().contains("status: 403"));
         assertTrue(ex.getMessage().contains("code: AuthenticationFailed"));
-        assertTrue(ex.getMessage().contains("Signed expiry time has to be after signed start time"));
-        assertTrue(ex.getMessage().contains("Check the credentials"));
+        assertTrue(ex.getMessage().contains("Signed expiry time has to be after signed start time. Check the credentials"));
         assertSame(cause, ex.getCause());
     }
 

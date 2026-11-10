@@ -4,25 +4,25 @@ import com.sun.net.httpserver.HttpServer;
 import org.embulk.EmbulkTestRuntime;
 import org.embulk.config.ConfigException;
 import org.embulk.config.ConfigSource;
-import org.junit.Rule;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.InetSocketAddress;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
-import java.io.BufferedReader;
-import java.net.Authenticator;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.Authenticator;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -216,8 +216,7 @@ public class TestServicePrincipalTokenProvider
                         try (Socket socket = proxyServer.accept()) {
                             BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
                             StringBuilder request = new StringBuilder();
-                            String line;
-                            while ((line = reader.readLine()) != null && !line.isEmpty()) {
+                            for (String line = reader.readLine(); line != null && !line.isEmpty(); line = reader.readLine()) {
                                 request.append(line).append("\n");
                             }
                             connectRequests.add(request.toString());

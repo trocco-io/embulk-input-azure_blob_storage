@@ -396,21 +396,30 @@ public class AzureBlobStorageFileInputPlugin
             StorageExtendedErrorInformation details = storageException.getExtendedErrorInformation();
             if (details != null && details.getAdditionalDetails() != null) {
                 details.getAdditionalDetails().forEach((key, values) ->
-                        message.append(" ").append(key).append(": ").append(String.join(", ", values)));
+                        endSentence(message).append(" ").append(key).append(": ").append(String.join(", ", values)));
             }
             // When something fails inside the SDK before the request is sent (e.g. refreshing the access token), the SDK
             // still reports the status of the request it then sent unsigned. Show the original error too.
             Throwable inner = storageException.getCause();
             if (inner != null && !(inner instanceof StorageException) && inner.getMessage() != null) {
-                message.append(" Caused by: ").append(inner.getMessage());
+                endSentence(message).append(" Caused by: ").append(inner.getMessage());
             }
             int status = storageException.getHttpStatusCode();
             if (status == 401 || status == 403) {
-                message.append(" Check the credentials for 'auth_method' (wrong or expired key or SAS token, or missing role or permission).");
+                endSentence(message).append(" Check the credentials for 'auth_method' (wrong or expired key or SAS token, or missing role or permission).");
             }
             return new DataException(message.toString(), storageException);
         }
         return new DataException(cause);
+    }
+
+    // The parts come from Azure and may not end with a period. Add one so that the next part reads as a new sentence.
+    private static StringBuilder endSentence(StringBuilder message)
+    {
+        if (message.length() > 0 && message.charAt(message.length() - 1) != '.') {
+            message.append('.');
+        }
+        return message;
     }
 
     private static ConfigException findConfigException(Throwable exception)
