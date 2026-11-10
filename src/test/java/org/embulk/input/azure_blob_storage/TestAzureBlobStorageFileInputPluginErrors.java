@@ -158,9 +158,9 @@ public class TestAzureBlobStorageFileInputPluginErrors
             }
             if (query != null && query.contains("marker=page2")) {
                 if (secondPageRequests.incrementAndGet() == 1) {
-                    // The second page fails once, after the first page was listed
-                    status = 403;
-                    body = "<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>AuthenticationFailed</Code><Message>failed</Message></Error>";
+                    // The second page fails once with a temporary error, after the first page was listed
+                    status = 503;
+                    body = "<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>ServerBusy</Code><Message>busy</Message></Error>";
                 }
                 else {
                     body = listResponse("data/b.csv", null);

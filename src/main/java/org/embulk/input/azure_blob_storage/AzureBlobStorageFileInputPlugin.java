@@ -168,8 +168,8 @@ public class AzureBlobStorageFileInputPlugin
     }
 
     static FileList listFilesWithPrefix(final PluginTask task, final AzureBlobClientFactory clientFactory,
-                                                final String containerName, final String prefix, final Optional<String> lastPath,
-                                                final int maxResults, final int maxConnectionRetry)
+                                        final String containerName, final String prefix, final Optional<String> lastPath,
+                                        final int maxResults, final int maxConnectionRetry)
     {
         final String lastKey = (lastPath.isPresent() && !lastPath.get().isEmpty()) ? createNextToken(lastPath.get()) : null;
         try {

@@ -59,7 +59,8 @@ public class AzureBlobClientFactory
      */
     public static void validate(PluginTask task)
     {
-        // Checked first, because the token provider of service_principal uses the proxy when it is created
+        // Checked here, before transaction() creates the client factory, because the token provider of
+        // service_principal uses the proxy when it is created
         if (task.getProxy().isPresent()) {
             Optional<String> host = task.getProxy().get().getHost();
             if (!host.isPresent() || host.get().trim().isEmpty()) {
