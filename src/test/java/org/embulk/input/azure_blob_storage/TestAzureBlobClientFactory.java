@@ -1,0 +1,231 @@
+package org.embulk.input.azure_blob_storage;
+
+import com.microsoft.azure.storage.OperationContext;
+import com.microsoft.azure.storage.SendingRequestEvent;
+import com.microsoft.azure.storage.StorageCredentialsAccountAndKey;
+import com.microsoft.azure.storage.StorageCredentialsSharedAccessSignature;
+import com.microsoft.azure.storage.StorageCredentialsToken;
+import com.microsoft.azure.storage.blob.CloudBlobClient;
+import org.embulk.EmbulkTestRuntime;
+import org.embulk.config.ConfigException;
+import org.embulk.config.ConfigSource;
+import org.embulk.input.azure_blob_storage.AzureBlobStorageFileInputPlugin.PluginTask;
+import org.junit.Rule;
+import org.junit.Test;
+
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.embulk.input.azure_blob_storage.AzureBlobStorageFileInputPlugin.CONFIG_MAPPER;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
+
+public class TestAzureBlobClientFactory
+{
+    @Rule
+    public EmbulkTestRuntime runtime = new EmbulkTestRuntime();
+
+    private ConfigSource baseConfig()
+    {
+        return runtime.getExec().newConfigSource()
+                .set("account_name", "myaccount")
+                .set("container", "my-container")
+                .set("path_prefix", "data/");
+    }
+
+    private PluginTask task(ConfigSource config)
+    {
+        return CONFIG_MAPPER.map(config, PluginTask.class);
+    }
+
+    @Test
+    public void testAccountKeyIsTheDefaultAndKeepsTheConnectionString()
+    {
+        // A valid base64 key, as the connection string parser checks the format.
+        PluginTask task = task(baseConfig().set("account_key", "a2V5"));
+        assertEquals(AuthMethod.ACCOUNT_KEY, task.getAuthMethod());
+
+        AzureBlobClientFactory factory = new AzureBlobClientFactory(task);
+        CloudBlobClient client = factory.createClient();
+        assertTrue(client.getCredentials() instanceof StorageCredentialsAccountAndKey);
+        assertEquals("https://myaccount.blob.core.windows.net", client.getEndpoint().toString());
+        // No proxy and no token: no context, same as before.
+        assertNull(factory.createOperationContext());
+    }
+
+    @Test
+    public void testSasTokenRemovesLeadingQuestionMark()
+    {
+        PluginTask task = task(baseConfig().set("auth_method", "sas_token").set("sas_token", " ?sv=2022-11-02&sig=abc "));
+
+        CloudBlobClient client = new AzureBlobClientFactory(task).createClient();
+        assertTrue(client.getCredentials() instanceof StorageCredentialsSharedAccessSignature);
+        assertEquals("sv=2022-11-02&sig=abc", ((StorageCredentialsSharedAccessSignature) client.getCredentials()).getToken());
+        assertEquals("https://myaccount.blob.core.windows.net", client.getEndpoint().toString());
+    }
+
+    @Test
+    public void testServicePrincipalRefreshesTokenBeforeEachRequest()
+    {
+        PluginTask task = task(baseConfig().set("auth_method", "service_principal")
+                .set("tenant_id", "t").set("client_id", "c").set("client_secret", "s"));
+        AtomicInteger calls = new AtomicInteger();
+        ServicePrincipalTokenProvider provider = stubProvider(calls);
+        AzureBlobClientFactory factory = new AzureBlobClientFactory(task, provider);
+
+        CloudBlobClient client = factory.createClient();
+        StorageCredentialsToken credentials = (StorageCredentialsToken) client.getCredentials();
+        assertEquals("token-1", credentials.getToken());
+
+        OperationContext op = factory.createOperationContext();
+        assertNotNull(op);
+        // The SDK fires this event right before it signs a request.
+        op.getSendingRequestEventHandler().fireEvent(new SendingRequestEvent(op, null, null));
+        assertEquals("token-2", credentials.getToken());
+    }
+
+    @Test
+    public void testServicePrincipalKeepsProxySettings()
+    {
+        PluginTask task = task(baseConfig().set("auth_method", "service_principal")
+                .set("tenant_id", "t").set("client_id", "c").set("client_secret", "s")
+                .set("proxy", proxyConfig()));
+        AtomicInteger calls = new AtomicInteger();
+        AzureBlobClientFactory factory = new AzureBlobClientFactory(task, stubProvider(calls));
+        CloudBlobClient client = factory.createClient();
+
+        OperationContext op = factory.createOperationContext();
+        assertEquals("proxy-host:8080", op.getProxy().address().toString());
+        assertEquals("user", op.getProxyUsername());
+        assertEquals("pass", op.getProxyPassword());
+        op.getSendingRequestEventHandler().fireEvent(new SendingRequestEvent(op, null, null));
+        assertEquals("token-2", ((StorageCredentialsToken) client.getCredentials()).getToken());
+    }
+
+    @Test
+    public void testSasTokenWithProxyDoesNotLogRequestUrls()
+    {
+        PluginTask task = task(baseConfig().set("auth_method", "sas_token").set("sas_token", "sv=1&sig=abc")
+                .set("proxy", proxyConfig()));
+
+        OperationContext op = new AzureBlobClientFactory(task).createOperationContext();
+        assertNotNull(op.getProxy());
+        assertFalse(op.isLoggingEnabled());
+    }
+
+    // resume() and open() read the task back from the TaskSource.
+    @Test
+    public void testAuthMethodSurvivesTaskSourceRoundTrip()
+    {
+        for (String method : new String[] {"account_key", "service_principal", "sas_token"}) {
+            PluginTask task = task(baseConfig().set("auth_method", method).set("account_key", "a2V5"));
+            task.setFiles(new FileList.Builder(task).build());
+            PluginTask restored = AzureBlobStorageFileInputPlugin.CONFIG_MAPPER_FACTORY.createTaskMapper()
+                    .map(task.toTaskSource(), PluginTask.class);
+            assertEquals(task.getAuthMethod(), restored.getAuthMethod());
+        }
+        PluginTask defaulted = task(baseConfig().set("account_key", "a2V5"));
+        defaulted.setFiles(new FileList.Builder(defaulted).build());
+        PluginTask restored = AzureBlobStorageFileInputPlugin.CONFIG_MAPPER_FACTORY.createTaskMapper()
+                .map(defaulted.toTaskSource(), PluginTask.class);
+        assertEquals(AuthMethod.ACCOUNT_KEY, restored.getAuthMethod());
+    }
+
+    // Providers are shared per service principal, secret and proxy settings, so that a job never uses another job's
+    // token or proxy.
+    @Test
+    public void testSharedTokenProviderKey()
+    {
+        ConfigSource base = baseConfig().set("auth_method", "service_principal")
+                .set("tenant_id", "shared-t").set("client_id", "shared-c").set("client_secret", "shared-s");
+        ServicePrincipalTokenProvider provider = AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy()));
+
+        assertSame(provider, AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy())));
+        assertNotSame(provider, AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy().set("tenant_id", "other"))));
+        assertNotSame(provider, AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy().set("client_id", "other"))));
+        assertNotSame(provider, AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy().set("client_secret", "other"))));
+        ServicePrincipalTokenProvider withProxy = AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy().set("proxy",
+                runtime.getExec().newConfigSource().set("type", "http").set("host", "proxy-a").set("port", 8080))));
+        assertNotSame(provider, withProxy);
+        assertNotSame(withProxy, AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy().set("proxy",
+                runtime.getExec().newConfigSource().set("type", "http").set("host", "proxy-b").set("port", 8080)))));
+    }
+
+    private ConfigSource proxyConfig()
+    {
+        return runtime.getExec().newConfigSource()
+                .set("type", "http").set("host", "proxy-host").set("port", 8080).set("user", "user").set("password", "pass");
+    }
+
+    private static ServicePrincipalTokenProvider stubProvider(AtomicInteger calls)
+    {
+        return new ServicePrincipalTokenProvider("http://unused", "t", "c", "s", null, () -> 0L, millis -> { }) {
+            @Override
+            public synchronized String getToken()
+            {
+                return "token-" + calls.incrementAndGet();
+            }
+        };
+    }
+
+    @Test
+    public void testRequiredOptionsForEachAuthMethod()
+    {
+        assertThrows(ConfigException.class, () -> AzureBlobClientFactory.validate(task(baseConfig())));
+        assertThrows(ConfigException.class, () -> AzureBlobClientFactory.validate(task(baseConfig().set("auth_method", "sas_token"))));
+        assertThrows(ConfigException.class, () -> AzureBlobClientFactory.validate(task(baseConfig()
+                .set("auth_method", "service_principal").set("tenant_id", "t").set("client_id", "c"))));
+        AzureBlobClientFactory.validate(task(baseConfig()
+                .set("auth_method", "service_principal").set("tenant_id", "t").set("client_id", "c").set("client_secret", "s")));
+    }
+
+    @Test
+    public void testRequiredOptionErrorNamesTheAuthMethod()
+    {
+        // e.g. auth_method is forgotten and only sas_token is set
+        ConfigException ex = assertThrows(ConfigException.class,
+                () -> AzureBlobClientFactory.validate(task(baseConfig().set("sas_token", "sv=1&sig=abc"))));
+        assertEquals("'account_key' is required when 'auth_method' is 'account_key'.", ex.getMessage());
+
+        ex = assertThrows(ConfigException.class, () -> AzureBlobClientFactory.validate(task(baseConfig()
+                .set("auth_method", "service_principal").set("tenant_id", "t").set("client_id", "c"))));
+        assertEquals("'client_secret' is required when 'auth_method' is 'service_principal'.", ex.getMessage());
+    }
+
+    @Test
+    public void testProxyWithoutHostIsAConfigError()
+    {
+        ConfigSource proxyWithoutHost = runtime.getExec().newConfigSource().set("type", "http").set("port", 8080);
+        for (ConfigSource config : new ConfigSource[] {
+                baseConfig().set("account_key", "a2V5"),
+                baseConfig().set("auth_method", "service_principal").set("tenant_id", "t").set("client_id", "c").set("client_secret", "s"),
+        }) {
+            ConfigException ex = assertThrows(ConfigException.class,
+                    () -> AzureBlobClientFactory.validate(task(config.set("proxy", proxyWithoutHost))));
+            assertEquals("'host' is required in 'proxy'.", ex.getMessage());
+        }
+    }
+
+    // Values copied from the Azure portal easily get a trailing newline
+    @Test
+    public void testServicePrincipalOptionsAreTrimmed()
+    {
+        ConfigSource base = baseConfig().set("auth_method", "service_principal");
+        ServicePrincipalTokenProvider provider = AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy()
+                .set("tenant_id", "trim-t").set("client_id", "trim-c").set("client_secret", "trim-s")));
+        assertSame(provider, AzureBlobClientFactory.sharedTokenProvider(task(base.deepCopy()
+                .set("tenant_id", " trim-t\n").set("client_id", "trim-c\n").set("client_secret", "trim-s "))));
+    }
+
+    @Test
+    public void testUnknownAuthMethod()
+    {
+        ConfigException ex = assertThrows(ConfigException.class, () -> AuthMethod.of("managed_identity"));
+        assertEquals("Unsupported 'auth_method': managed_identity, supported values: account_key, service_principal, sas_token", ex.getMessage());
+    }
+}

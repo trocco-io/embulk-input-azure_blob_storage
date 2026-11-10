@@ -58,12 +58,19 @@ public interface ProxyTask
             return null;
         }
         OperationContext op = new OperationContext();
-        //current support only http proxy
-        Proxy proxy = new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyTask.getHost().get().trim(), proxyTask.getPort()));
-        op.setProxy(proxy);
+        op.setProxy(toProxy(proxyTask));
         op.setProxyUsername(proxyTask.getUser().orElse(null));
         op.setProxyPassword(proxyTask.getPassword().orElse(null));
         op.setLoggingEnabled(true);
         return op;
+    }
+
+    static Proxy toProxy(ProxyTask proxyTask)
+    {
+        if (proxyTask == null) {
+            return null;
+        }
+        //current support only http proxy
+        return new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyTask.getHost().get().trim(), proxyTask.getPort()));
     }
 }

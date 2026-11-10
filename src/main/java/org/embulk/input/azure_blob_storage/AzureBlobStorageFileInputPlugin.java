@@ -2,7 +2,6 @@ package org.embulk.input.azure_blob_storage;
 
 import java.io.IOException;
 import java.net.URISyntaxException;
-import java.security.InvalidKeyException;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
@@ -31,12 +30,12 @@ import org.slf4j.LoggerFactory;
 
 import com.google.common.base.Charsets;
 import com.google.common.io.BaseEncoding;
-import com.microsoft.azure.storage.CloudStorageAccount;
 import com.microsoft.azure.storage.OperationContext;
 import com.microsoft.azure.storage.ResultContinuation;
 import com.microsoft.azure.storage.ResultContinuationType;
 import com.microsoft.azure.storage.ResultSegment;
 import com.microsoft.azure.storage.StorageException;
+import com.microsoft.azure.storage.StorageExtendedErrorInformation;
 import com.microsoft.azure.storage.blob.CloudBlob;
 import com.microsoft.azure.storage.blob.CloudBlobClient;
 import com.microsoft.azure.storage.blob.CloudBlobContainer;
@@ -51,8 +50,32 @@ public class AzureBlobStorageFileInputPlugin
         @Config("account_name")
         String getAccountName();
 
+        @Config("auth_method")
+        @ConfigDefault("\"account_key\"")
+        AuthMethod getAuthMethod();
+
+        // auth_method: account_key
         @Config("account_key")
-        String getAccountKey();
+        @ConfigDefault("null")
+        Optional<String> getAccountKey();
+
+        // auth_method: service_principal
+        @Config("tenant_id")
+        @ConfigDefault("null")
+        Optional<String> getTenantId();
+
+        @Config("client_id")
+        @ConfigDefault("null")
+        Optional<String> getClientId();
+
+        @Config("client_secret")
+        @ConfigDefault("null")
+        Optional<String> getClientSecret();
+
+        // auth_method: sas_token
+        @Config("sas_token")
+        @ConfigDefault("null")
+        Optional<String> getSasToken();
 
         @Config("container")
         String getContainer();
@@ -100,6 +123,7 @@ public class AzureBlobStorageFileInputPlugin
     public ConfigDiff transaction(ConfigSource config, FileInputPlugin.Control control)
     {
         final PluginTask task = CONFIG_MAPPER.map(config, PluginTask.class);
+        AzureBlobClientFactory.validate(task);
         if (task.getProxy().isPresent()) {
             System.setProperty("jdk.http.auth.tunneling.disabledSchemes", "");
         }
@@ -127,31 +151,13 @@ public class AzureBlobStorageFileInputPlugin
     {
     }
 
-    private static CloudBlobClient newAzureClient(String accountName, String accountKey)
-    {
-        String connectionString = "DefaultEndpointsProtocol=https;" +
-                "AccountName=" + accountName + ";" +
-                "AccountKey=" + accountKey;
-
-        CloudStorageAccount account;
-        try {
-            account = CloudStorageAccount.parse(connectionString);
-        }
-        catch (InvalidKeyException | URISyntaxException ex) {
-            throw new ConfigException(ex);
-        }
-        return account.createCloudBlobClient();
-    }
-
     private FileList listFiles(PluginTask task)
     {
         if (task.getPathPrefix().equals("/")) {
             log.info("Listing files with prefix \"/\". This doesn't mean all files in a bucket. If you intend to read all files, use \"path_prefix: ''\" (empty string) instead.");
         }
-        FileList.Builder builder = new FileList.Builder(task);
-
-        FileList fileList = listFilesWithPrefix(builder, task.getAccountName(), task.getAccountKey(), task.getContainer(), task.getPathPrefix(),
-                                    task.getLastPath(), task.getMaxResults(), task.getMaxConnectionRetry(), task.getProxy().orElse(null));
+        FileList fileList = listFilesWithPrefix(task, new AzureBlobClientFactory(task), task.getContainer(), task.getPathPrefix(),
+                                    task.getLastPath(), task.getMaxResults(), task.getMaxConnectionRetry());
 
         if (fileList.getTaskCount() == 0 && task.getStopWhenFileNotFound()) {
             throw new ConfigException("No file is found. \"stop_when_file_not_found\" option is \"true\".");
@@ -161,12 +167,11 @@ public class AzureBlobStorageFileInputPlugin
 
     }
 
-    private static FileList listFilesWithPrefix(final FileList.Builder builder, final String accountName, final String accountKey,
-                                                final String containerName, final String prefix, final Optional<String> lastPath,
-                                                final int maxResults, final int maxConnectionRetry, ProxyTask proxyTask)
+    static FileList listFilesWithPrefix(final PluginTask task, final AzureBlobClientFactory clientFactory,
+                                        final String containerName, final String prefix, final Optional<String> lastPath,
+                                        final int maxResults, final int maxConnectionRetry)
     {
         final String lastKey = (lastPath.isPresent() && !lastPath.get().isEmpty()) ? createNextToken(lastPath.get()) : null;
-        final OperationContext op = ProxyTask.toOperationContext(proxyTask);
         try {
             return RetryExecutor.builder()
                     .withRetryLimit(maxConnectionRetry)
@@ -176,7 +181,9 @@ public class AzureBlobStorageFileInputPlugin
                         @Override
                         public FileList call() throws StorageException, URISyntaxException, IOException
                         {
-                            CloudBlobClient client = newAzureClient(accountName, accountKey);
+                            // A new list for each attempt, because a retry lists again from the first page
+                            final FileList.Builder builder = new FileList.Builder(task);
+                            CloudBlobClient client = clientFactory.createClient();
                             ResultContinuation token = null;
                             if (lastKey != null) {
                                 token = new ResultContinuation();
@@ -189,12 +196,20 @@ public class AzureBlobStorageFileInputPlugin
                             CloudBlobContainer container = client.getContainerReference(containerName);
                             ResultSegment<ListBlobItem> blobs;
                             do {
+                                // A new context for each page, as the SDK keeps the result of every request in it
+                                final OperationContext op = clientFactory.createOperationContext();
                                 blobs = container.listBlobsSegmented(prefix, true, null, maxResults, token, null, op);
+                                // For the existence check of each blob, without the SDK's request logging that a proxy turns on
+                                final OperationContext existsOp = clientFactory.createOperationContext();
+                                if (existsOp != null) {
+                                    existsOp.setLoggingEnabled(false);
+                                }
                                 log.debug(String.format("result count(include directory):%s continuationToken:%s", blobs.getLength(), blobs.getContinuationToken()));
                                 for (ListBlobItem blobItem : blobs.getResults()) {
                                     if (blobItem instanceof CloudBlob) {
                                         CloudBlob blob = (CloudBlob) blobItem;
-                                        if (blob.exists() && !blob.getUri().toString().endsWith("/")) {
+                                        // Pass the context so this request also uses a refreshed token (service_principal)
+                                        if (blob.exists(null, null, existsOp) && !blob.getUri().toString().endsWith("/")) {
                                             if (lastPath.isPresent()
                                                     && !lastPath.get().isEmpty()
                                                     && blob.getName().equals(lastPath.get())) {
@@ -214,7 +229,7 @@ public class AzureBlobStorageFileInputPlugin
                         @Override
                         public boolean isRetryableException(Exception exception)
                         {
-                            return true;
+                            return isRetryable(exception);
                         }
 
                         @Override
@@ -239,7 +254,7 @@ public class AzureBlobStorageFileInputPlugin
                     });
         }
         catch (RetryGiveupException ex) {
-            throw new DataException(ex.getCause());
+            throw toUserException(ex.getCause());
         }
         catch (InterruptedException ex) {
             throw new DataException(ex);
@@ -275,20 +290,23 @@ public class AzureBlobStorageFileInputPlugin
     class SingleFileProvider
             implements InputStreamFileInput.Provider
     {
-        private CloudBlobClient client;
+        private final AzureBlobClientFactory clientFactory;
         private final String containerName;
         private final Iterator<String> iterator;
         private final int maxConnectionRetry;
         private boolean opened = false;
-        private final OperationContext op;
 
         public SingleFileProvider(PluginTask task, int taskIndex)
         {
-            this.client = newAzureClient(task.getAccountName(), task.getAccountKey());
+            this(task, taskIndex, new AzureBlobClientFactory(task));
+        }
+
+        SingleFileProvider(PluginTask task, int taskIndex, AzureBlobClientFactory clientFactory)
+        {
+            this.clientFactory = clientFactory;
             this.containerName = task.getContainer();
             this.iterator = task.getFiles().get(taskIndex).iterator();
             this.maxConnectionRetry = task.getMaxConnectionRetry();
-            this.op = ProxyTask.toOperationContext(task.getProxy().orElse(null));
         }
 
         @Override
@@ -308,6 +326,9 @@ public class AzureBlobStorageFileInputPlugin
                             @Override
                             public InputStreamFileInput.InputStreamWithHints call() throws StorageException, URISyntaxException, IOException
                             {
+                                // Created here so that getting an access token (service_principal) is retried like the request
+                                CloudBlobClient client = clientFactory.createClient();
+                                OperationContext op = clientFactory.createOperationContext();
                                 CloudBlobContainer container = client.getContainerReference(containerName);
                                 CloudBlob blob = container.getBlockBlobReference(key);
                                 return new InputStreamFileInput.InputStreamWithHints(
@@ -319,7 +340,7 @@ public class AzureBlobStorageFileInputPlugin
                             @Override
                             public boolean isRetryableException(Exception exception)
                             {
-                                return true;
+                                return isRetryable(exception);
                             }
 
                             @Override
@@ -344,7 +365,7 @@ public class AzureBlobStorageFileInputPlugin
                         });
             }
             catch (RetryGiveupException ex) {
-                throw new DataException(ex.getCause());
+                throw toUserException(ex.getCause());
             }
             catch (InterruptedException ex) {
                 throw new DataException(ex);
@@ -353,6 +374,65 @@ public class AzureBlobStorageFileInputPlugin
 
         @Override
         public void close() {}
+    }
+
+    // Configuration errors (e.g. a wrong client secret) don't go away on retry. Everything else is retried as before.
+    static boolean isRetryable(Throwable exception)
+    {
+        return findConfigException(exception) == null;
+    }
+
+    // Makes the final error say why the request failed, instead of only the SDK's generic message.
+    static RuntimeException toUserException(Throwable cause)
+    {
+        ConfigException configException = findConfigException(cause);
+        if (configException != null) {
+            return configException;
+        }
+        if (cause instanceof StorageException) {
+            StorageException storageException = (StorageException) cause;
+            StringBuilder message = new StringBuilder(String.format("Azure Blob Storage request failed (status: %d, code: %s): %s",
+                    storageException.getHttpStatusCode(), storageException.getErrorCode(), storageException.getMessage()));
+            StorageExtendedErrorInformation details = storageException.getExtendedErrorInformation();
+            if (details != null && details.getAdditionalDetails() != null) {
+                details.getAdditionalDetails().forEach((key, values) ->
+                        endSentence(message).append(" ").append(key).append(": ").append(String.join(", ", values)));
+            }
+            // When something fails inside the SDK before the request is sent (e.g. refreshing the access token), the SDK
+            // still reports the status of the request it then sent unsigned. Show the original error too.
+            Throwable inner = storageException.getCause();
+            if (inner != null && !(inner instanceof StorageException) && inner.getMessage() != null) {
+                endSentence(message).append(" Caused by: ").append(inner.getMessage());
+            }
+            int status = storageException.getHttpStatusCode();
+            if (status == 401 || status == 403) {
+                endSentence(message).append(" Check the credentials for 'auth_method' (wrong or expired key or SAS token, or missing role or permission).");
+            }
+            return new DataException(message.toString(), storageException);
+        }
+        return new DataException(cause);
+    }
+
+    // The parts come from Azure and may not end with a period. Add one so that the next part reads as a new sentence.
+    private static StringBuilder endSentence(StringBuilder message)
+    {
+        if (message.length() > 0 && message.charAt(message.length() - 1) != '.') {
+            message.append('.');
+        }
+        return message;
+    }
+
+    private static ConfigException findConfigException(Throwable exception)
+    {
+        for (Throwable t = exception; t != null; t = t.getCause()) {
+            if (t instanceof ConfigException) {
+                return (ConfigException) t;
+            }
+            if (t.getCause() == t) {
+                break;
+            }
+        }
+        return null;
     }
 
     private static String createNextToken(String path)

@@ -1,3 +1,11 @@
+## Unreleased (trocco)
+* [new feature] Support `auth_method` option: `service_principal` (Microsoft Entra ID client credentials) and `sas_token`, in addition to `account_key`. Existing configurations keep using `account_key`.
+* [maintenance] Blob existence checks during listing now use the configured `proxy`.
+* [maintenance] Configuration errors (e.g. a wrong client secret or an invalid account key) are no longer retried.
+* [maintenance] The final error of a failed request includes the HTTP status, the error code and Azure's error details.
+* [maintenance] Fix files listed twice when listing is retried after a failure partway through.
+* [maintenance] `proxy` without `host` is reported as a configuration error.
+
 ## 0.3.2 - 2022-02-14
 * [maintenance] enhance skip file logic to skip a file in the last_path only if this file exists in the azure blob storage.
 
