@@ -376,10 +376,19 @@ public class AzureBlobStorageFileInputPlugin
         public void close() {}
     }
 
-    // Configuration errors (e.g. a wrong client secret) don't go away on retry. Everything else is retried as before.
+    // Configuration errors (e.g. a wrong client secret) and errors of Entra ID that are not temporary don't go away on
+    // retry. Everything else is retried as before.
     static boolean isRetryable(Throwable exception)
     {
-        return findConfigException(exception) == null;
+        if (findConfigException(exception) != null) {
+            return false;
+        }
+        for (Throwable e = exception; e != null; e = e.getCause() == e ? null : e.getCause()) {
+            if (e instanceof ServicePrincipalTokenProvider.TokenRequestException) {
+                return e instanceof ServicePrincipalTokenProvider.RetryableTokenException;
+            }
+        }
+        return true;
     }
 
     // Makes the final error say why the request failed, instead of only the SDK's generic message.

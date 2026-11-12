@@ -67,6 +67,11 @@ public class TestAzureBlobStorageFileInputPluginErrors
         // A token refresh that fails inside the SDK comes back as a StorageException with status 306 and the original
         // exception as the cause (the request is not sent).
         assertFalse(AzureBlobStorageFileInputPlugin.isRetryable(new StorageException(null, "wrong client secret", 306, null, configException)));
+        // An error of Entra ID that is not temporary is not retried; a temporary one is.
+        assertFalse(AzureBlobStorageFileInputPlugin.isRetryable(new StorageException(null, "unexpected", 306, null,
+                new ServicePrincipalTokenProvider.TokenRequestException("unexpected status", null))));
+        assertTrue(AzureBlobStorageFileInputPlugin.isRetryable(new StorageException(null, "temporary", 306, null,
+                new ServicePrincipalTokenProvider.RetryableTokenException("temporary", null))));
         // Everything else is retried as before.
         assertTrue(AzureBlobStorageFileInputPlugin.isRetryable(new StorageException("AuthenticationFailed", "auth", 403, null, null)));
         assertTrue(AzureBlobStorageFileInputPlugin.isRetryable(new RuntimeException("network")));
