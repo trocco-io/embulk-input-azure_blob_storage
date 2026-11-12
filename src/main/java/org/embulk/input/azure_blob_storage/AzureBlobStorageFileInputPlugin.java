@@ -389,6 +389,10 @@ public class AzureBlobStorageFileInputPlugin
         if (configException != null) {
             return configException;
         }
+        if (cause instanceof StorageException && failedBeforeSending((StorageException) cause)) {
+            // The status and the message of such an exception are not from Azure, so show only the original error.
+            return new DataException(cause.getCause().getMessage(), cause);
+        }
         if (cause instanceof StorageException) {
             StorageException storageException = (StorageException) cause;
             StringBuilder message = new StringBuilder(String.format("Azure Blob Storage request failed (status: %d, code: %s): %s",
@@ -398,8 +402,7 @@ public class AzureBlobStorageFileInputPlugin
                 details.getAdditionalDetails().forEach((key, values) ->
                         endSentence(message).append(" ").append(key).append(": ").append(String.join(", ", values)));
             }
-            // When something fails inside the SDK before the request is sent (e.g. refreshing the access token), the SDK
-            // still reports the status of the request it then sent unsigned. Show the original error too.
+            // e.g. a network error while reading the response
             Throwable inner = storageException.getCause();
             if (inner != null && !(inner instanceof StorageException) && inner.getMessage() != null) {
                 endSentence(message).append(" Caused by: ").append(inner.getMessage());
@@ -420,6 +423,17 @@ public class AzureBlobStorageFileInputPlugin
             message.append('.');
         }
         return message;
+    }
+
+    /**
+     * True when the request was not sent, because something failed while preparing it: the SDK catches an exception
+     * thrown before signing (e.g. while refreshing the access token) and throws a StorageException with status 306
+     * and the original exception as the cause.
+     */
+    static boolean failedBeforeSending(StorageException exception)
+    {
+        return exception.getHttpStatusCode() == 306 && exception.getCause() != null
+                && !(exception.getCause() instanceof StorageException) && exception.getCause().getMessage() != null;
     }
 
     private static ConfigException findConfigException(Throwable exception)
