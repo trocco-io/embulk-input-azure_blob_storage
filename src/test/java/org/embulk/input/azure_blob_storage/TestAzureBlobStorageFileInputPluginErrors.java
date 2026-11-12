@@ -64,9 +64,14 @@ public class TestAzureBlobStorageFileInputPluginErrors
     {
         ConfigException configException = new ConfigException("wrong client secret");
         assertFalse(AzureBlobStorageFileInputPlugin.isRetryable(configException));
-        // A token refresh that fails inside the SDK comes back as a StorageException with the status of the request the
-        // SDK then sent unsigned, and the original exception as the cause.
-        assertFalse(AzureBlobStorageFileInputPlugin.isRetryable(new StorageException("AuthenticationFailed", "auth", 401, null, configException)));
+        // A token refresh that fails inside the SDK comes back as a StorageException with status 306 and the original
+        // exception as the cause (the request is not sent).
+        assertFalse(AzureBlobStorageFileInputPlugin.isRetryable(new StorageException(null, "wrong client secret", 306, null, configException)));
+        // An error of Entra ID that is not temporary is not retried; a temporary one is.
+        assertFalse(AzureBlobStorageFileInputPlugin.isRetryable(new StorageException(null, "unexpected", 306, null,
+                new ServicePrincipalTokenProvider.TokenRequestException("unexpected status", null))));
+        assertTrue(AzureBlobStorageFileInputPlugin.isRetryable(new StorageException(null, "temporary", 306, null,
+                new ServicePrincipalTokenProvider.RetryableTokenException("temporary", null))));
         // Everything else is retried as before.
         assertTrue(AzureBlobStorageFileInputPlugin.isRetryable(new StorageException("AuthenticationFailed", "auth", 403, null, null)));
         assertTrue(AzureBlobStorageFileInputPlugin.isRetryable(new RuntimeException("network")));
@@ -96,15 +101,17 @@ public class TestAzureBlobStorageFileInputPluginErrors
         assertSame(configException, ex);
     }
 
+    // The SDK catches an exception thrown before signing (e.g. a failed refresh) and throws this, without sending the
+    // request
     @Test
-    public void testFinalErrorShowsTheOriginalErrorOfAFailedRefresh()
+    public void testFinalErrorOfAFailedRefreshShowsOnlyTheOriginalError()
     {
         RuntimeException refreshError = new ServicePrincipalTokenProvider.RetryableTokenException(
                 "Microsoft Entra ID returned a temporary error (status: 503)", null);
         RuntimeException ex = AzureBlobStorageFileInputPlugin.toUserException(
-                new StorageException("AuthenticationFailed", "Server failed to authenticate the request.", 401, null, refreshError));
-        assertTrue(ex.getMessage().contains("status: 401"));
-        assertTrue(ex.getMessage().contains("Caused by: Microsoft Entra ID returned a temporary error (status: 503)"));
+                new StorageException(null, refreshError.getMessage(), 306, null, refreshError));
+        assertTrue(ex instanceof DataException);
+        assertEquals("Microsoft Entra ID returned a temporary error (status: 503)", ex.getMessage());
     }
 
     // The client is created inside the retried call, so getting an access token when a file is opened is retried.

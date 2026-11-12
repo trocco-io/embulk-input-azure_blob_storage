@@ -3,6 +3,8 @@
 * [maintenance] Blob existence checks during listing now use the configured `proxy`.
 * [maintenance] Configuration errors (e.g. a wrong client secret or an invalid account key) are no longer retried.
 * [maintenance] The final error of a failed request includes the HTTP status, the error code and Azure's error details.
+* [maintenance] When a request is not sent because getting the access token failed, the final error shows only that error.
+* [maintenance] After a failed request for an access token, Microsoft Entra ID is not asked again for 10 seconds (the current token is used while it is valid). Errors of Entra ID that are not temporary, and responses that are not from Entra ID (e.g. from a proxy), are not reported as configuration errors and are not retried.
 * [maintenance] Fix files listed twice when listing is retried after a failure partway through.
 * [maintenance] `proxy` without `host` is reported as a configuration error.
 

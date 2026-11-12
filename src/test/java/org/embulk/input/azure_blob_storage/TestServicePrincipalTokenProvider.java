@@ -21,13 +21,18 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -207,21 +212,93 @@ public class TestServicePrincipalTokenProvider
         assertEquals(requestsAfterFailure + 1, requestCount.get());
     }
 
-    // Once the token has expired, a new one is requested even right after a failure
+    // Without a valid token, the error is thrown again for a while instead of asking Entra ID for every request: the
+    // tasks sharing the provider would otherwise each run all the attempts while holding the lock
     @Test
-    public void testExpiredTokenIsAlwaysRequestedAgain()
+    public void testFailureWithoutAValidTokenIsThrownAgainForAWhile()
     {
-        ServicePrincipalTokenProvider provider = provider();
-        assertEquals("token-1", provider.getToken());
-
-        now.addAndGet(3600_000L - 1000L);
         responseStatus = 503;
         responseBody = "";
-        assertEquals("token-1", provider.getToken());
+        ServicePrincipalTokenProvider provider = provider();
+        RuntimeException first = assertThrows(RuntimeException.class, provider::getToken);
+        assertEquals(ServicePrincipalTokenProvider.MAX_ATTEMPTS, requestCount.get());
 
-        now.addAndGet(2000L);
-        assertThrows(RuntimeException.class, provider::getToken);
-        assertEquals(1 + 2 * ServicePrincipalTokenProvider.MAX_ATTEMPTS, requestCount.get());
+        now.addAndGet(ServicePrincipalTokenProvider.REFRESH_RETRY_INTERVAL_MILLIS - 1);
+        assertSame(first, assertThrows(RuntimeException.class, provider::getToken));
+        assertEquals(ServicePrincipalTokenProvider.MAX_ATTEMPTS, requestCount.get());
+
+        // After the interval: asked again, and the token is used once Entra ID is back
+        now.addAndGet(1);
+        responseStatus = 200;
+        responseBody = "{\"access_token\":\"token-new\",\"expires_in\":3600}";
+        assertEquals("token-new", provider.getToken());
+    }
+
+    @Test
+    public void testNetworkErrorsAreRetriedWithBackoff() throws IOException
+    {
+        int closedPort;
+        try (ServerSocket socket = new ServerSocket(0)) {
+            closedPort = socket.getLocalPort();
+        }
+        ServicePrincipalTokenProvider provider = new ServicePrincipalTokenProvider(
+                "http://127.0.0.1:" + closedPort, "t", "c", "s", null, now::get, sleeps::add);
+
+        RuntimeException ex = assertThrows(RuntimeException.class, provider::getToken);
+        assertTrue(ex instanceof ServicePrincipalTokenProvider.RetryableTokenException);
+        assertTrue(ex.getMessage(), ex.getMessage().contains("Microsoft Entra ID"));
+        assertEquals(Arrays.asList(1000L, 2000L), sleeps);
+    }
+
+    @Test
+    public void testSuccessWithoutAccessTokenIsNotAConfigError()
+    {
+        responseBody = "<html>Sign in to the gateway</html>";
+        RuntimeException ex = assertThrows(RuntimeException.class, () -> provider().getToken());
+        assertTrue(ex.getClass().getName(), ex instanceof ServicePrincipalTokenProvider.TokenRequestException);
+        assertTrue(ex.getMessage(), ex.getMessage().contains("has no access_token"));
+        assertEquals(1, requestCount.get());
+    }
+
+    // e.g. an error page of a gateway on the way, which says nothing about the tenant, client or secret
+    @Test
+    public void testClientErrorThatIsNotFromEntraIdIsNotAConfigError()
+    {
+        responseStatus = 400;
+        responseBody = "<html>Bad Request</html>";
+        RuntimeException ex = assertThrows(RuntimeException.class, () -> provider().getToken());
+        assertFalse(ex.getClass().getName(), ex instanceof ConfigException);
+        assertTrue(ex.getMessage(), ex.getMessage().contains("not from Microsoft Entra ID"));
+    }
+
+    @Test
+    public void testUnknownTenantIsAConfigError()
+    {
+        responseStatus = 400;
+        responseBody = "{\"error\":\"invalid_request\",\"error_description\":\"AADSTS90002: Tenant not found.\"}";
+        ConfigException ex = assertThrows(ConfigException.class, () -> provider().getToken());
+        assertTrue(ex.getMessage(), ex.getMessage().contains("AADSTS90002"));
+    }
+
+    // Tasks share one provider: only one of them asks Entra ID
+    @Test
+    public void testConcurrentCallsRequestOneToken() throws Exception
+    {
+        ServicePrincipalTokenProvider provider = provider();
+        ExecutorService executor = Executors.newFixedThreadPool(8);
+        try {
+            List<Future<String>> results = new ArrayList<>();
+            for (int i = 0; i < 8; i++) {
+                results.add(executor.submit(provider::getToken));
+            }
+            for (Future<String> result : results) {
+                assertEquals("token-1", result.get());
+            }
+        }
+        finally {
+            executor.shutdownNow();
+        }
+        assertEquals(1, requestCount.get());
     }
 
     @Test
