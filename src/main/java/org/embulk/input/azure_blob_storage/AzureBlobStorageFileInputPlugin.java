@@ -376,10 +376,19 @@ public class AzureBlobStorageFileInputPlugin
         public void close() {}
     }
 
-    // Configuration errors (e.g. a wrong client secret) don't go away on retry. Everything else is retried as before.
+    // Configuration errors (e.g. a wrong client secret) and errors of Entra ID that are not temporary don't go away on
+    // retry. Everything else is retried as before.
     static boolean isRetryable(Throwable exception)
     {
-        return findConfigException(exception) == null;
+        if (findConfigException(exception) != null) {
+            return false;
+        }
+        for (Throwable e = exception; e != null; e = e.getCause() == e ? null : e.getCause()) {
+            if (e instanceof ServicePrincipalTokenProvider.TokenRequestException) {
+                return e instanceof ServicePrincipalTokenProvider.RetryableTokenException;
+            }
+        }
+        return true;
     }
 
     // Makes the final error say why the request failed, instead of only the SDK's generic message.
@@ -388,6 +397,10 @@ public class AzureBlobStorageFileInputPlugin
         ConfigException configException = findConfigException(cause);
         if (configException != null) {
             return configException;
+        }
+        if (cause instanceof StorageException && failedBeforeSending((StorageException) cause)) {
+            // The status and the message of such an exception are not from Azure, so show only the original error.
+            return new DataException(cause.getCause().getMessage(), cause);
         }
         if (cause instanceof StorageException) {
             StorageException storageException = (StorageException) cause;
@@ -398,8 +411,7 @@ public class AzureBlobStorageFileInputPlugin
                 details.getAdditionalDetails().forEach((key, values) ->
                         endSentence(message).append(" ").append(key).append(": ").append(String.join(", ", values)));
             }
-            // When something fails inside the SDK before the request is sent (e.g. refreshing the access token), the SDK
-            // still reports the status of the request it then sent unsigned. Show the original error too.
+            // e.g. a network error while reading the response
             Throwable inner = storageException.getCause();
             if (inner != null && !(inner instanceof StorageException) && inner.getMessage() != null) {
                 endSentence(message).append(" Caused by: ").append(inner.getMessage());
@@ -420,6 +432,17 @@ public class AzureBlobStorageFileInputPlugin
             message.append('.');
         }
         return message;
+    }
+
+    /**
+     * True when the request was not sent, because something failed while preparing it: the SDK catches an exception
+     * thrown before signing (e.g. while refreshing the access token) and throws a StorageException with status 306
+     * and the original exception as the cause.
+     */
+    static boolean failedBeforeSending(StorageException exception)
+    {
+        return exception.getHttpStatusCode() == 306 && exception.getCause() != null
+                && !(exception.getCause() instanceof StorageException) && exception.getCause().getMessage() != null;
     }
 
     private static ConfigException findConfigException(Throwable exception)
